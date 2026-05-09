@@ -1,0 +1,5 @@
+# Streamforge git ignore
+
+# Ignore prompt files for now
+.github/prompts/
+*.prompt.md
