@@ -100,6 +100,8 @@ Create a repo structure, development workflow, and baseline architecture skeleto
 
 ## 4. Phase 1 — End-to-End Streaming MVP
 
+> **Detailed plan**: see [streamforge-phase1-plan.md](streamforge-phase1-plan.md) for workstream-level step-by-step implementation with file targets, struct definitions, and a completion checklist.
+
 ### Objective
 Deliver the first working slice where an agent captures the screen, sends JPEG frames through the Go server, and a browser viewer renders them.
 
