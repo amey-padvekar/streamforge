@@ -638,3 +638,11 @@ Real systems thinking > demo gimmicks
 ```
 
 Streamforge is designed as clean, extensible, infrastructure-grade real-time streaming technology with deliberate, measurable engineering decisions.
+
+---
+
+## 24. Implementation Companion
+
+The detailed phase-by-phase implementation roadmap lives in [docs/design/streamforge-implementation-plan.md](docs/design/streamforge-implementation-plan.md).
+
+Use this document as the execution guide for translating the architecture in this design into concrete milestones, workstreams, validation checkpoints, and delivery order.

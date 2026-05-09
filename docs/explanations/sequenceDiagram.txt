@@ -1,0 +1,40 @@
+sequenceDiagram
+    autonumber
+    participant A as Agent
+    participant S as Streaming Server
+    participant V as Browser Viewer
+
+    Note over S: Session created via REST/API
+    S->>S: Create session state<br/>issue session ID + tokens
+
+    A->>S: WebSocket connect
+    A->>S: AUTH(agent, sessionId, token)
+    S-->>A: AUTH_OK
+
+    V->>S: WebSocket connect
+    V->>S: AUTH(viewer, sessionId, token)
+    S-->>V: AUTH_OK
+
+    loop Capture and stream loop
+        A->>A: Capture screen frame
+        A->>A: JPEG encode
+        A->>S: FRAME packet
+        S->>S: Validate + route to session
+        S-->>V: FRAME packet
+        V->>V: Decode JPEG
+        V->>V: Draw to canvas
+    end
+
+    opt Remote interaction
+        V->>S: INPUT packet
+        S->>S: Validate permissions
+        S-->>A: INPUT packet
+        A->>A: Inject mouse/keyboard event
+    end
+
+    loop Health and adaptation
+        A->>S: HEARTBEAT / METRICS
+        V->>S: HEARTBEAT / METRICS
+        S->>S: Measure latency, queue depth, drops
+        S-->>A: QUALITY / CONTROL update
+    end

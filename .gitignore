@@ -3,3 +3,26 @@
 # Ignore prompt files for now
 .github/prompts/
 *.prompt.md
+
+# Frontend artifacts
+web/viewer/node_modules/
+web/viewer/dist/
+
+# Go build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Logs and local env
+*.log
+.env
+.env.*
+
+# Editor and OS clutter
+.DS_Store
+Thumbs.db
