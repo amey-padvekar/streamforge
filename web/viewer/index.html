@@ -6,7 +6,53 @@
     <title>Streamforge Viewer</title>
   </head>
   <body>
-    <div id="app"></div>
+    <main id="app" class="viewer-page">
+      <canvas id="viewer-canvas" aria-label="Remote desktop stream"></canvas>
+
+      <div id="viewer-overlay" class="viewer-overlay">
+        <div class="viewer-stats">
+          <p>
+            Status:
+            <span id="connection-status" data-state="disconnected">disconnected</span>
+          </p>
+          <p>
+            FPS:
+            <span id="fps-value">0</span>
+          </p>
+        </div>
+
+        <form id="connect-form" class="connect-form" autocomplete="off">
+          <label for="server-url">Server URL</label>
+          <input
+            id="server-url"
+            name="serverUrl"
+            type="text"
+            placeholder="ws://localhost:8080"
+            required
+          />
+
+          <label for="session-id">Session ID</label>
+          <input
+            id="session-id"
+            name="sessionId"
+            type="text"
+            placeholder="session id"
+            required
+          />
+
+          <label for="viewer-token">Viewer Token</label>
+          <input
+            id="viewer-token"
+            name="viewerToken"
+            type="text"
+            placeholder="viewer token"
+            required
+          />
+
+          <button id="connect-button" type="submit">Connect</button>
+        </form>
+      </div>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
