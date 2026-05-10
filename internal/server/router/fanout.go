@@ -10,6 +10,7 @@ func FanoutFrame(s *session.Session, frame []byte) (forwarded int, dropped int) 
 	}
 
 	forwarded, dropped = s.EnqueueFrameForViewers(frame)
+	s.AddForwardedFrames(forwarded)
 	s.AddDroppedFrames(dropped)
 
 	return forwarded, dropped

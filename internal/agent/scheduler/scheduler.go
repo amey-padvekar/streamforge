@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 const (
 	defaultFPS     = 20
 	defaultQuality = 75
+	ewmaAlpha      = 0.2
 )
 
 // Scheduler drives periodic frame capture/encode/send at a target FPS.
@@ -95,8 +97,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 	defer fpsLogTick.Stop()
 
 	windowStart := time.Now()
-	framesInWindow := 0
-	actualFPS := 0.0
+	capturedFramesInWindow := 0
+	actualCaptureFPS := 0.0
+	encodeAvgMs := 0.0
+	sendLatencyAvgMs := 0.0
 	frameID := uint32(0)
 	skipNextTick := false
 
@@ -109,7 +113,13 @@ func (s *Scheduler) Start(ctx context.Context) {
 			s.logger.Info("scheduler stopped by Stop")
 			return
 		case <-fpsLogTick.C:
-			s.logger.Info("scheduler fps", "targetFPS", s.fps, "actualFPS", actualFPS)
+			s.logger.Info(
+				"scheduler telemetry",
+				"targetFPS", s.fps,
+				"actualCaptureFPS", roundTo2(actualCaptureFPS),
+				"jpegEncodeAvgMs", roundTo2(encodeAvgMs),
+				"sendLatencyAvgMs", roundTo2(sendLatencyAvgMs),
+			)
 		case <-tick.C:
 			if skipNextTick {
 				skipNextTick = false
@@ -123,12 +133,17 @@ func (s *Scheduler) Start(ctx context.Context) {
 				s.logger.Warn("capture failed", "error", err)
 				continue
 			}
+			capturedFramesInWindow++
 
+			encodeStart := time.Now()
 			jpegBytes, err := encoder.EncodeJPEG(img, s.quality)
 			if err != nil {
 				s.logger.Warn("jpeg encode failed", "error", err)
 				continue
 			}
+			encodeDurationMs := float64(time.Since(encodeStart)) / float64(time.Millisecond)
+			encodeAvgMs = updateEWMA(encodeAvgMs, encodeDurationMs)
+			encodeEnd := time.Now()
 
 			bounds := img.Bounds()
 			width := bounds.Dx()
@@ -149,14 +164,15 @@ func (s *Scheduler) Start(ctx context.Context) {
 				s.logger.Warn("frame send failed", "error", err, "frameID", frameID)
 				continue
 			}
+			sendLatencyMs := float64(time.Since(encodeEnd)) / float64(time.Millisecond)
+			sendLatencyAvgMs = updateEWMA(sendLatencyAvgMs, sendLatencyMs)
 
 			frameID++
-			framesInWindow++
 
 			windowElapsed := time.Since(windowStart)
 			if windowElapsed >= time.Second {
-				actualFPS = float64(framesInWindow) / windowElapsed.Seconds()
-				framesInWindow = 0
+				actualCaptureFPS = float64(capturedFramesInWindow) / windowElapsed.Seconds()
+				capturedFramesInWindow = 0
 				windowStart = time.Now()
 			}
 
@@ -165,6 +181,17 @@ func (s *Scheduler) Start(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func updateEWMA(current, sample float64) float64 {
+	if current <= 0 {
+		return sample
+	}
+	return ewmaAlpha*sample + (1-ewmaAlpha)*current
+}
+
+func roundTo2(v float64) float64 {
+	return math.Round(v*100) / 100
 }
 
 // Stop requests scheduler shutdown.

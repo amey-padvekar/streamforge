@@ -26,10 +26,20 @@ type Session struct {
 
 	CreatedAt time.Time
 
-	viewerOutbound map[string]chan []byte
-	droppedFrames  uint64
+	viewerOutbound  map[string]chan []byte
+	framesReceived  uint64
+	framesForwarded uint64
+	droppedFrames   uint64
 
 	mu sync.RWMutex
+}
+
+type MetricsSnapshot struct {
+	SessionID       string
+	FramesReceived  uint64
+	FramesForwarded uint64
+	FramesDropped   uint64
+	ViewerCount     int
 }
 
 func (s *Session) ConnectionState() (hasAgent bool, viewerCount int) {
@@ -105,6 +115,26 @@ func (s *Session) EnqueueFrameForViewers(frame []byte) (forwarded int, dropped i
 	return forwarded, dropped
 }
 
+func (s *Session) AddReceivedFrames(count int) {
+	if count <= 0 {
+		return
+	}
+
+	s.mu.Lock()
+	s.framesReceived += uint64(count)
+	s.mu.Unlock()
+}
+
+func (s *Session) AddForwardedFrames(count int) {
+	if count <= 0 {
+		return
+	}
+
+	s.mu.Lock()
+	s.framesForwarded += uint64(count)
+	s.mu.Unlock()
+}
+
 func (s *Session) AddDroppedFrames(count int) {
 	if count <= 0 {
 		return
@@ -120,4 +150,17 @@ func (s *Session) DroppedFrames() uint64 {
 	defer s.mu.RUnlock()
 
 	return s.droppedFrames
+}
+
+func (s *Session) MetricsSnapshot() MetricsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return MetricsSnapshot{
+		SessionID:       s.ID,
+		FramesReceived:  s.framesReceived,
+		FramesForwarded: s.framesForwarded,
+		FramesDropped:   s.droppedFrames,
+		ViewerCount:     len(s.Viewers),
+	}
 }

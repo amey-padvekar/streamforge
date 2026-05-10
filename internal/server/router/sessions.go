@@ -59,14 +59,20 @@ func (h *SessionHandler) HandleSessionMetrics(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if _, ok := h.Registry.Get(sessionID); !ok {
+	s, ok := h.Registry.Get(sessionID)
+	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 
+	metrics := s.MetricsSnapshot()
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sessionId": sessionID,
-		"metrics":   map[string]any{},
+		"sessionId":       sessionID,
+		"framesReceived":  metrics.FramesReceived,
+		"framesForwarded": metrics.FramesForwarded,
+		"framesDropped":   metrics.FramesDropped,
+		"viewerCount":     metrics.ViewerCount,
 	})
 }
 

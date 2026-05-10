@@ -40,6 +40,9 @@ type WSTransport struct {
 	writeM sync.Mutex
 	conn   *websocket.Conn
 	closed bool
+
+	everConnected  bool
+	reconnectCount uint64
 }
 
 // NewWSTransport creates an agent WebSocket transport.
@@ -150,6 +153,10 @@ func (t *WSTransport) ensureConnected() (*websocket.Conn, error) {
 
 func (t *WSTransport) connectWithRetry() (*websocket.Conn, error) {
 	var lastErr error
+	wasReconnect := t.wasConnectedBefore()
+	if wasReconnect {
+		t.logger.Info("agent reconnect started", "sessionId", t.sessionID)
+	}
 
 	for attempt := 0; attempt <= t.maxRetries; attempt++ {
 		conn, err := t.connectOnce()
@@ -164,6 +171,10 @@ func (t *WSTransport) connectWithRetry() (*websocket.Conn, error) {
 
 		t.logger.Warn("agent reconnect attempt failed", "sessionId", t.sessionID, "attempt", attempt+1, "error", err)
 		t.sleepBackoff(attempt + 1)
+	}
+
+	if wasReconnect {
+		t.logger.Error("agent reconnect failed", "sessionId", t.sessionID, "maxRetries", t.maxRetries+1, "error", lastErr)
 	}
 
 	return nil, fmt.Errorf("failed to connect after %d attempts: %w", t.maxRetries+1, lastErr)
@@ -193,19 +204,39 @@ func (t *WSTransport) connectOnce() (*websocket.Conn, error) {
 	}
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.closed {
+		t.mu.Unlock()
 		_ = conn.Close()
 		return nil, errors.New("transport is closed")
 	}
 	if t.conn != nil {
+		t.mu.Unlock()
 		_ = conn.Close()
 		return t.conn, nil
 	}
-	t.conn = conn
 
-	t.logger.Info("agent websocket connected", "sessionId", t.sessionID, "url", t.wsURL)
+	isReconnect := t.everConnected
+	reconnectCount := t.reconnectCount
+	if isReconnect {
+		t.reconnectCount++
+		reconnectCount = t.reconnectCount
+	}
+	t.everConnected = true
+	t.conn = conn
+	t.mu.Unlock()
+
+	if isReconnect {
+		t.logger.Info("agent websocket reconnected", "sessionId", t.sessionID, "url", t.wsURL, "reconnectCount", reconnectCount)
+	} else {
+		t.logger.Info("agent websocket connected", "sessionId", t.sessionID, "url", t.wsURL)
+	}
 	return conn, nil
+}
+
+func (t *WSTransport) wasConnectedBefore() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.everConnected
 }
 
 func (t *WSTransport) dropConn(candidate *websocket.Conn) {

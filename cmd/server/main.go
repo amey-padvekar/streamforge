@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,6 +45,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	startSessionTelemetryLogger(ctx, registry, logger)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -82,6 +84,70 @@ func main() {
 
 		logger.Info("server stopped")
 	}
+}
+
+type sessionFPSState struct {
+	framesReceived uint64
+	lastAt         time.Time
+}
+
+func startSessionTelemetryLogger(ctx context.Context, registry *session.Registry, logger *slog.Logger) {
+	if registry == nil || logger == nil {
+		return
+	}
+
+	const interval = 5 * time.Second
+	ticker := time.NewTicker(interval)
+	states := make(map[string]sessionFPSState)
+
+	go func() {
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				sessions := registry.List()
+				alive := make(map[string]struct{}, len(sessions))
+
+				for _, s := range sessions {
+					metrics := s.MetricsSnapshot()
+					alive[metrics.SessionID] = struct{}{}
+
+					prev, ok := states[metrics.SessionID]
+					if !ok {
+						states[metrics.SessionID] = sessionFPSState{framesReceived: metrics.FramesReceived, lastAt: now}
+						continue
+					}
+
+					elapsed := now.Sub(prev.lastAt).Seconds()
+					fps := 0.0
+					if elapsed > 0 && metrics.FramesReceived >= prev.framesReceived {
+						fps = float64(metrics.FramesReceived-prev.framesReceived) / elapsed
+					}
+
+					logger.Info(
+						"session telemetry",
+						"sessionId", metrics.SessionID,
+						"fps", math.Round(fps*100)/100,
+						"framesReceived", metrics.FramesReceived,
+						"framesForwarded", metrics.FramesForwarded,
+						"framesDropped", metrics.FramesDropped,
+						"viewerCount", metrics.ViewerCount,
+					)
+
+					states[metrics.SessionID] = sessionFPSState{framesReceived: metrics.FramesReceived, lastAt: now}
+				}
+
+				for sessionID := range states {
+					if _, ok := alive[sessionID]; !ok {
+						delete(states, sessionID)
+					}
+				}
+			}
+		}
+	}()
 }
 
 func resolveServerAddr() string {

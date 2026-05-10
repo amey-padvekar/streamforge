@@ -10,6 +10,7 @@ const viewerTokenInput = document.querySelector<HTMLInputElement>("#viewer-token
 const connectButton = document.querySelector<HTMLButtonElement>("#connect-button");
 const statusValue = document.querySelector<HTMLSpanElement>("#connection-status");
 const fpsValue = document.querySelector<HTMLSpanElement>("#fps-value");
+const dimensionsValue = document.querySelector<HTMLSpanElement>("#dimensions-value");
 
 if (
   !canvas ||
@@ -19,7 +20,8 @@ if (
   !viewerTokenInput ||
   !connectButton ||
   !statusValue ||
-  !fpsValue
+  !fpsValue ||
+  !dimensionsValue
 ) {
   throw new Error("viewer ui elements not found");
 }
@@ -78,6 +80,7 @@ disconnectButton.addEventListener("click", () => {
 
 const fpsInterval = window.setInterval(() => {
   fpsValue.textContent = String(renderer.getFps());
+  dimensionsValue.textContent = renderer.getFrameDimensions();
 }, 1000);
 
 window.addEventListener("beforeunload", () => {

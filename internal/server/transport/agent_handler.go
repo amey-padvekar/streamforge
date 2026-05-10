@@ -36,6 +36,7 @@ func (h *WSHandler) handleAgentConnection(s *session.Session, conn *websocket.Co
 			return
 		}
 
+		s.AddReceivedFrames(1)
 		framesReceived++
 		slog.Info("agent frame received", "sessionId", s.ID, "frameBytes", len(frame), "framesReceived", framesReceived)
 

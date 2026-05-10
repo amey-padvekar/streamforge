@@ -32,9 +32,6 @@ export class Viewer {
   private stateChangeHandler?: (state: ViewerConnectionState) => void;
   private state: ViewerConnectionState = "disconnected";
 
-  // Serialize decode/draw work so frames are rendered in receive order.
-  private renderQueue: Promise<void> = Promise.resolve();
-
   constructor(options: ViewerOptions) {
     this.serverUrl = options.serverUrl;
     this.sessionId = options.sessionId;
@@ -136,9 +133,7 @@ export class Viewer {
 
     const jpeg = extractJpegPayload(buffer, header);
 
-    this.renderQueue = this.renderQueue
-      .then(() => this.renderer.render(jpeg))
-      .catch(() => {
+    void this.renderer.render(jpeg, header.width, header.height).catch(() => {
         this.setState("error");
       });
   }
