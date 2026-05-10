@@ -15,6 +15,7 @@ func (h *WSHandler) handleAgentConnection(s *session.Session, conn *websocket.Co
 	}
 
 	slog.Info("agent connected", "sessionId", s.ID)
+	framesReceived := 0
 	defer func() {
 		s.DetachAgent(conn)
 		slog.Info("agent disconnected", "sessionId", s.ID)
@@ -34,6 +35,9 @@ func (h *WSHandler) handleAgentConnection(s *session.Session, conn *websocket.Co
 			closeWithProtocolError(conn, websocket.CloseUnsupportedData, "agent frames must be binary")
 			return
 		}
+
+		framesReceived++
+		slog.Info("agent frame received", "sessionId", s.ID, "frameBytes", len(frame), "framesReceived", framesReceived)
 
 		if err := h.AgentFrameRouter(s, frame); err != nil {
 			slog.Warn("agent frame routing failed", "sessionId", s.ID, "error", err)
