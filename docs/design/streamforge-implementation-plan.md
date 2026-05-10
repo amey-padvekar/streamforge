@@ -194,6 +194,8 @@ Deliver the first working slice where an agent captures the screen, sends JPEG f
 
 ## 5. Phase 2 — Protocol and Runtime Stability
 
+> Detailed plan: see [streamforge-phase2-plan.md](streamforge-phase2-plan.md) for workstream-level implementation steps, packet model details, validation checkpoints, and a completion checklist.
+
 ### Objective
 Replace the MVP transport shortcuts with a stable binary protocol and improve runtime behavior under pressure.
 

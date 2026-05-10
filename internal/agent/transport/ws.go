@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"streamforge/internal/protocol"
 )
 
 const (
@@ -17,11 +19,6 @@ const (
 	defaultBaseBackoff = 500 * time.Millisecond
 	defaultMaxBackoff  = 8 * time.Second
 )
-
-type authHandshake struct {
-	Role  string `json:"role"`
-	Token string `json:"token"`
-}
 
 // WSTransport sends frame packets from the agent to the server over WebSocket.
 type WSTransport struct {
@@ -198,9 +195,123 @@ func (t *WSTransport) connectOnce() (*websocket.Conn, error) {
 		return nil, fmt.Errorf("dial failed: %w", err)
 	}
 
-	if err := conn.WriteJSON(authHandshake{Role: "agent", Token: t.token}); err != nil {
+	// Send HELLO packet
+	helloPayload, err := protocol.EncodeHello(protocol.HelloPayload{
+		AgentID:          "agent",
+		SupportedVersion: protocol.ProtocolVersion,
+		CapabilityFlags:  0,
+	})
+	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("auth handshake failed: %w", err)
+		return nil, fmt.Errorf("encode HELLO failed: %w", err)
+	}
+
+	helloHeader := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeHello,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  0,
+		TimestampNs: 0,
+		PayloadLen:  uint32(len(helloPayload)),
+	}
+
+	helloPacket, err := protocol.BuildPacket(helloHeader, helloPayload)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("build HELLO packet failed: %w", err)
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, helloPacket); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("HELLO handshake failed: %w", err)
+	}
+
+	// Read ACK or ERROR response
+	_, respData, err := conn.ReadMessage()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read HELLO response failed: %w", err)
+	}
+
+	respHeader, respPayload, err := protocol.ParsePacket(respData)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("parse HELLO response failed: %w", err)
+	}
+
+	if respHeader.PacketType == protocol.PacketTypeError {
+		errPayload, parseErr := protocol.DecodeError(respPayload)
+		if parseErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("server rejected HELLO: %s (%s)", errPayload.Reason, errPayload.Detail)
+		}
+		_ = conn.Close()
+		return nil, fmt.Errorf("server rejected HELLO with unparseable error")
+	}
+
+	if respHeader.PacketType != protocol.PacketTypeAck {
+		_ = conn.Close()
+		return nil, fmt.Errorf("invalid HELLO response type: expected ACK, got %d", respHeader.PacketType)
+	}
+
+	// Send AUTH packet
+	authPayload, err := protocol.EncodeAuth(protocol.AuthPayload{
+		Role:  "agent",
+		Token: t.token,
+	})
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("encode AUTH failed: %w", err)
+	}
+
+	authHeader := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeAuth,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  1,
+		TimestampNs: 0,
+		PayloadLen:  uint32(len(authPayload)),
+	}
+
+	authPacket, err := protocol.BuildPacket(authHeader, authPayload)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("build AUTH packet failed: %w", err)
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, authPacket); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("AUTH handshake failed: %w", err)
+	}
+
+	// Read AUTH response
+	_, authRespData, err := conn.ReadMessage()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read AUTH response failed: %w", err)
+	}
+
+	authRespHeader, authRespPayload, err := protocol.ParsePacket(authRespData)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("parse AUTH response failed: %w", err)
+	}
+
+	if authRespHeader.PacketType == protocol.PacketTypeError {
+		errPayload, parseErr := protocol.DecodeError(authRespPayload)
+		if parseErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("server rejected AUTH: %s (%s)", errPayload.Reason, errPayload.Detail)
+		}
+		_ = conn.Close()
+		return nil, fmt.Errorf("server rejected AUTH with unparseable error")
+	}
+
+	if authRespHeader.PacketType != protocol.PacketTypeAck {
+		_ = conn.Close()
+		return nil, fmt.Errorf("invalid AUTH response type: expected ACK, got %d", authRespHeader.PacketType)
 	}
 
 	t.mu.Lock()

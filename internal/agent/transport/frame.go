@@ -3,27 +3,20 @@ package transport
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
+
+	"streamforge/internal/protocol"
 )
 
 const (
-	FrameVersion    = uint8(1)
-	PacketTypeFrame = uint8(0x01)
-
-	headerSize = 15
+	framePayloadMetadataSize  = 5
+	framePayloadWidthOffset   = 0
+	framePayloadHeightOffset  = 2
+	framePayloadQualityOffset = 4
+	framePayloadJPEGOffset    = 5
 )
 
-const (
-	offsetVersion     = 0
-	offsetPacketType  = 1
-	offsetFrameID     = 2
-	offsetWidth       = 6
-	offsetHeight      = 8
-	offsetJPEGQuality = 10
-	offsetPayloadLen  = 11
-	offsetPayload     = 15
-)
-
-// FrameHeader is the fixed-size metadata section for a streamed frame packet.
+// FrameHeader is parsed from the common protocol header + frame payload metadata.
 type FrameHeader struct {
 	Version     uint8
 	PacketType  uint8
@@ -34,42 +27,53 @@ type FrameHeader struct {
 	PayloadLen  uint32
 }
 
-// EncodeFrame encodes a frame packet as fixed-size header + JPEG payload.
+// EncodeFrame encodes a frame packet as common protocol header + frame payload.
 func EncodeFrame(frameID uint32, width, height uint16, quality uint8, jpeg []byte) []byte {
-	payloadLen := len(jpeg)
-	packet := make([]byte, offsetPayload+payloadLen)
+	payload := make([]byte, framePayloadMetadataSize+len(jpeg))
+	binary.BigEndian.PutUint16(payload[framePayloadWidthOffset:framePayloadWidthOffset+2], width)
+	binary.BigEndian.PutUint16(payload[framePayloadHeightOffset:framePayloadHeightOffset+2], height)
+	payload[framePayloadQualityOffset] = quality
+	copy(payload[framePayloadJPEGOffset:], jpeg)
 
-	packet[offsetVersion] = FrameVersion
-	packet[offsetPacketType] = PacketTypeFrame
-	binary.BigEndian.PutUint32(packet[offsetFrameID:offsetFrameID+4], frameID)
-	binary.BigEndian.PutUint16(packet[offsetWidth:offsetWidth+2], width)
-	binary.BigEndian.PutUint16(packet[offsetHeight:offsetHeight+2], height)
-	packet[offsetJPEGQuality] = quality
-	binary.BigEndian.PutUint32(packet[offsetPayloadLen:offsetPayloadLen+4], uint32(payloadLen))
-	copy(packet[offsetPayload:], jpeg)
+	header := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeFrame,
+		SequenceID:  frameID,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  uint32(len(payload)),
+	}
+
+	packet, err := protocol.BuildPacket(header, payload)
+	if err != nil {
+		return nil
+	}
 
 	return packet
 }
 
-// DecodeFrameHeader decodes and validates the fixed-size frame header.
+// DecodeFrameHeader decodes and validates frame metadata from a protocol packet.
 func DecodeFrameHeader(data []byte) (FrameHeader, error) {
-	if len(data) < headerSize {
-		return FrameHeader{}, fmt.Errorf("frame header too short: got %d bytes, need %d", len(data), headerSize)
+	h, payload, err := protocol.ParsePacket(data)
+	if err != nil {
+		return FrameHeader{}, err
 	}
 
-	header := FrameHeader{
-		Version:     data[offsetVersion],
-		PacketType:  data[offsetPacketType],
-		FrameID:     binary.BigEndian.Uint32(data[offsetFrameID : offsetFrameID+4]),
-		Width:       binary.BigEndian.Uint16(data[offsetWidth : offsetWidth+2]),
-		Height:      binary.BigEndian.Uint16(data[offsetHeight : offsetHeight+2]),
-		JPEGQuality: data[offsetJPEGQuality],
-		PayloadLen:  binary.BigEndian.Uint32(data[offsetPayloadLen : offsetPayloadLen+4]),
+	if h.PacketType != protocol.PacketTypeFrame {
+		return FrameHeader{}, fmt.Errorf("invalid packet type: got 0x%02x, want 0x%02x", uint8(h.PacketType), uint8(protocol.PacketTypeFrame))
 	}
 
-	if header.PacketType != PacketTypeFrame {
-		return FrameHeader{}, fmt.Errorf("invalid packet type: got 0x%02x, want 0x%02x", header.PacketType, PacketTypeFrame)
+	if len(payload) < framePayloadMetadataSize {
+		return FrameHeader{}, fmt.Errorf("frame payload metadata too short: got %d bytes, need %d", len(payload), framePayloadMetadataSize)
 	}
 
-	return header, nil
+	jpegPayloadLen := len(payload) - framePayloadMetadataSize
+	return FrameHeader{
+		Version:     h.Version,
+		PacketType:  uint8(h.PacketType),
+		FrameID:     h.SequenceID,
+		Width:       binary.BigEndian.Uint16(payload[framePayloadWidthOffset : framePayloadWidthOffset+2]),
+		Height:      binary.BigEndian.Uint16(payload[framePayloadHeightOffset : framePayloadHeightOffset+2]),
+		JPEGQuality: payload[framePayloadQualityOffset],
+		PayloadLen:  uint32(jpegPayloadLen),
+	}, nil
 }

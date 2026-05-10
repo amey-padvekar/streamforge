@@ -1,4 +1,13 @@
-import { extractJpegPayload, parseFrameHeader } from "./protocol";
+import {
+  extractJpegPayload,
+  parseFrameHeader,
+  encodeHello,
+  encodeAuth,
+  decodeErrorPayload,
+  PACKET_TYPE_ACK,
+  PACKET_TYPE_ERROR,
+  PROTOCOL_HEADER_SIZE,
+} from "./protocol";
 import { Renderer } from "./renderer";
 
 const BASE_RECONNECT_DELAY_MS = 500;
@@ -31,6 +40,8 @@ export class Viewer {
   private shouldReconnect = true;
   private stateChangeHandler?: (state: ViewerConnectionState) => void;
   private state: ViewerConnectionState = "disconnected";
+  private authed = false;
+  private ready = false;
 
   constructor(options: ViewerOptions) {
     this.serverUrl = options.serverUrl;
@@ -56,6 +67,8 @@ export class Viewer {
     }
 
     this.reconnectAttempt = 0;
+    this.authed = false;
+    this.ready = false;
     this.setState("disconnected");
   }
 
@@ -73,6 +86,8 @@ export class Viewer {
       this.socket = null;
     }
 
+    this.authed = false;
+    this.ready = false;
     this.setState(isReconnect ? "reconnecting" : "connecting");
 
     const socket = new WebSocket(this.buildSessionUrl());
@@ -87,8 +102,15 @@ export class Viewer {
       this.reconnectAttempt = 0;
       this.setState("connected");
 
-      const handshake = JSON.stringify({ role: "viewer", token: this.viewerToken });
-      socket.send(handshake);
+      // Send HELLO packet
+      try {
+        const helloPacket = encodeHello("viewer", 1, 0);
+        socket.send(helloPacket.buffer);
+      } catch (err) {
+        console.error("failed to encode HELLO:", err);
+        this.setState("error");
+        socket.close();
+      }
     };
 
     socket.onerror = () => {
@@ -120,9 +142,74 @@ export class Viewer {
       }
 
       if (event.data instanceof ArrayBuffer) {
-        this.enqueueRender(event.data);
+        this.handleBinaryMessage(event.data);
       }
     };
+  }
+
+  private handleBinaryMessage(buffer: ArrayBuffer): void {
+    if (buffer.byteLength < PROTOCOL_HEADER_SIZE) {
+      console.error("message too short for header");
+      return;
+    }
+
+    const view = new DataView(buffer);
+    const packetType = view.getUint8(1);
+
+    // If we haven't sent AUTH yet, expect ACK to HELLO
+    if (this.state === "connected" && !this.authed) {
+      if (packetType === PACKET_TYPE_ACK) {
+        // ACK to HELLO received, now send AUTH
+        this.authed = true;
+        try {
+          const authPacket = encodeAuth("viewer", this.viewerToken);
+          if (this.socket) {
+            this.socket.send(authPacket.buffer);
+          }
+        } catch (err) {
+          console.error("failed to encode AUTH:", err);
+          this.setState("error");
+          if (this.socket) {
+            this.socket.close();
+          }
+        }
+      } else if (packetType === PACKET_TYPE_ERROR) {
+        const payload = new Uint8Array(buffer, PROTOCOL_HEADER_SIZE);
+        const error = decodeErrorPayload(payload);
+        console.error("server rejected HELLO:", error?.reason, error?.detail);
+        this.setState("error");
+        if (this.socket) {
+          this.socket.close();
+        }
+      } else {
+        console.warn("ignoring unsupported handshake packet before AUTH", { packetType });
+      }
+      return;
+    }
+
+    // If we sent AUTH, expect ACK or ERROR response
+    if (this.authed && !this.ready) {
+      if (packetType === PACKET_TYPE_ACK) {
+        this.ready = true;
+        return;
+      } else if (packetType === PACKET_TYPE_ERROR) {
+        const payload = new Uint8Array(buffer, PROTOCOL_HEADER_SIZE);
+        const error = decodeErrorPayload(payload);
+        console.error("server rejected AUTH:", error?.reason, error?.detail);
+        this.setState("error");
+        if (this.socket) {
+          this.socket.close();
+        }
+      } else {
+        console.warn("ignoring unsupported handshake packet after AUTH", { packetType });
+      }
+      return;
+    }
+
+    // After handshake, expect FRAME packets
+    if (this.ready) {
+      this.enqueueRender(buffer);
+    }
   }
 
   private enqueueRender(buffer: ArrayBuffer): void {
@@ -134,8 +221,8 @@ export class Viewer {
     const jpeg = extractJpegPayload(buffer, header);
 
     void this.renderer.render(jpeg, header.width, header.height).catch(() => {
-        this.setState("error");
-      });
+      this.setState("error");
+    });
   }
 
   private scheduleReconnect(): void {

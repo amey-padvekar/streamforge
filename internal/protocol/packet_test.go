@@ -1,0 +1,92 @@
+package protocol
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestBuildParsePacket_RoundTrip(t *testing.T) {
+	payload := []byte{1, 2, 3, 4, 5}
+	h := Header{
+		Version:     ProtocolVersion,
+		PacketType:  PacketTypeControl,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  7,
+		TimestampNs: 99,
+		PayloadLen:  uint32(len(payload)),
+	}
+
+	packet, err := BuildPacket(h, payload)
+	if err != nil {
+		t.Fatalf("BuildPacket failed: %v", err)
+	}
+
+	gotHeader, gotPayload, err := ParsePacket(packet)
+	if err != nil {
+		t.Fatalf("ParsePacket failed: %v", err)
+	}
+
+	if gotHeader != h {
+		t.Fatalf("header mismatch: got %+v want %+v", gotHeader, h)
+	}
+	if len(gotPayload) != len(payload) {
+		t.Fatalf("payload length mismatch: got %d want %d", len(gotPayload), len(payload))
+	}
+	for i := range payload {
+		if gotPayload[i] != payload[i] {
+			t.Fatalf("payload byte mismatch at %d: got %d want %d", i, gotPayload[i], payload[i])
+		}
+	}
+}
+
+func TestBuildPacket_LengthMismatch(t *testing.T) {
+	_, err := BuildPacket(Header{
+		Version:    ProtocolVersion,
+		PacketType: PacketTypeFrame,
+		PayloadLen: 10,
+	}, []byte{1, 2, 3})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, ErrLengthMismatch) {
+		t.Fatalf("expected ErrLengthMismatch, got %v", err)
+	}
+}
+
+func TestBuildPacket_PayloadTooLarge(t *testing.T) {
+	payload := make([]byte, MaxPayloadBytes+1)
+	_, err := BuildPacket(Header{
+		Version:    ProtocolVersion,
+		PacketType: PacketTypeFrame,
+		PayloadLen: uint32(len(payload)),
+	}, payload)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("expected ErrPayloadTooLarge, got %v", err)
+	}
+}
+
+func TestParsePacket_LengthMismatch(t *testing.T) {
+	payload := []byte{1, 2}
+	h := Header{
+		Version:    ProtocolVersion,
+		PacketType: PacketTypeFrame,
+		PayloadLen: uint32(len(payload)),
+	}
+	packet, err := BuildPacket(h, payload)
+	if err != nil {
+		t.Fatalf("BuildPacket failed: %v", err)
+	}
+
+	truncated := packet[:len(packet)-1]
+	_, _, err = ParsePacket(truncated)
+	if err == nil {
+		t.Fatalf("expected error for mismatched packet length")
+	}
+	if !errors.Is(err, ErrLengthMismatch) {
+		t.Fatalf("expected ErrLengthMismatch, got %v", err)
+	}
+}
