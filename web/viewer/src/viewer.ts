@@ -3,22 +3,34 @@ import {
   parseFrameHeader,
   encodeHello,
   encodeAuth,
+  encodeHeartbeat,
   decodeErrorPayload,
   PACKET_TYPE_ACK,
   PACKET_TYPE_ERROR,
+  PACKET_TYPE_HEARTBEAT,
   PROTOCOL_HEADER_SIZE,
 } from "./protocol";
 import { Renderer } from "./renderer";
 
 const BASE_RECONNECT_DELAY_MS = 500;
 const MAX_RECONNECT_DELAY_MS = 8000;
+const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_TIMEOUT_MS = 15000;
+
+const VALID_TRANSITIONS: Record<ViewerConnectionState, ViewerConnectionState[]> = {
+  disconnected: ["connecting"],
+  connecting: ["authenticated", "stale", "disconnected"],
+  authenticated: ["streaming", "stale", "disconnected"],
+  streaming: ["stale", "disconnected"],
+  stale: ["connecting", "disconnected"],
+};
 
 export type ViewerConnectionState =
   | "disconnected"
   | "connecting"
-  | "connected"
-  | "reconnecting"
-  | "error";
+  | "authenticated"
+  | "streaming"
+  | "stale";
 
 export interface ViewerOptions {
   serverUrl: string;
@@ -37,6 +49,9 @@ export class Viewer {
   private socket: WebSocket | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempt = 0;
+  private heartbeatSeq = 0;
+  private heartbeatIntervalTimer: number | null = null;
+  private heartbeatTimeoutTimer: number | null = null;
   private shouldReconnect = true;
   private stateChangeHandler?: (state: ViewerConnectionState) => void;
   private state: ViewerConnectionState = "disconnected";
@@ -60,6 +75,7 @@ export class Viewer {
   disconnect(): void {
     this.shouldReconnect = false;
     this.clearReconnectTimer();
+    this.clearHeartbeatTimers();
 
     if (this.socket) {
       this.socket.close();
@@ -88,7 +104,7 @@ export class Viewer {
 
     this.authed = false;
     this.ready = false;
-    this.setState(isReconnect ? "reconnecting" : "connecting");
+    this.setState("connecting");
 
     const socket = new WebSocket(this.buildSessionUrl());
     socket.binaryType = "arraybuffer";
@@ -100,15 +116,14 @@ export class Viewer {
       }
 
       this.reconnectAttempt = 0;
-      this.setState("connected");
 
       // Send HELLO packet
       try {
         const helloPacket = encodeHello("viewer", 1, 0);
-        socket.send(helloPacket.buffer);
+        socket.send(helloPacket.buffer as ArrayBuffer);
       } catch (err) {
         console.error("failed to encode HELLO:", err);
-        this.setState("error");
+        this.setState("stale");
         socket.close();
       }
     };
@@ -118,7 +133,7 @@ export class Viewer {
         return;
       }
 
-      this.setState("error");
+      this.setState("stale");
     };
 
     socket.onclose = () => {
@@ -129,6 +144,7 @@ export class Viewer {
       this.socket = null;
 
       if (!this.shouldReconnect) {
+        this.clearHeartbeatTimers();
         this.setState("disconnected");
         return;
       }
@@ -142,6 +158,7 @@ export class Viewer {
       }
 
       if (event.data instanceof ArrayBuffer) {
+        this.bumpHeartbeatTimeout();
         this.handleBinaryMessage(event.data);
       }
     };
@@ -157,18 +174,18 @@ export class Viewer {
     const packetType = view.getUint8(1);
 
     // If we haven't sent AUTH yet, expect ACK to HELLO
-    if (this.state === "connected" && !this.authed) {
+    if (this.state === "connecting" && !this.authed) {
       if (packetType === PACKET_TYPE_ACK) {
         // ACK to HELLO received, now send AUTH
         this.authed = true;
         try {
           const authPacket = encodeAuth("viewer", this.viewerToken);
           if (this.socket) {
-            this.socket.send(authPacket.buffer);
+            this.socket.send(authPacket.buffer as ArrayBuffer);
           }
         } catch (err) {
           console.error("failed to encode AUTH:", err);
-          this.setState("error");
+          this.setState("stale");
           if (this.socket) {
             this.socket.close();
           }
@@ -177,7 +194,7 @@ export class Viewer {
         const payload = new Uint8Array(buffer, PROTOCOL_HEADER_SIZE);
         const error = decodeErrorPayload(payload);
         console.error("server rejected HELLO:", error?.reason, error?.detail);
-        this.setState("error");
+        this.setState("stale");
         if (this.socket) {
           this.socket.close();
         }
@@ -190,13 +207,15 @@ export class Viewer {
     // If we sent AUTH, expect ACK or ERROR response
     if (this.authed && !this.ready) {
       if (packetType === PACKET_TYPE_ACK) {
+        this.setState("authenticated");
         this.ready = true;
+        this.startHeartbeatLoop();
         return;
       } else if (packetType === PACKET_TYPE_ERROR) {
         const payload = new Uint8Array(buffer, PROTOCOL_HEADER_SIZE);
         const error = decodeErrorPayload(payload);
         console.error("server rejected AUTH:", error?.reason, error?.detail);
-        this.setState("error");
+        this.setState("stale");
         if (this.socket) {
           this.socket.close();
         }
@@ -208,6 +227,11 @@ export class Viewer {
 
     // After handshake, expect FRAME packets
     if (this.ready) {
+      if (packetType === PACKET_TYPE_HEARTBEAT) {
+        return;
+      }
+
+      this.setState("streaming");
       this.enqueueRender(buffer);
     }
   }
@@ -221,7 +245,7 @@ export class Viewer {
     const jpeg = extractJpegPayload(buffer, header);
 
     void this.renderer.render(jpeg, header.width, header.height).catch(() => {
-      this.setState("error");
+      this.setState("stale");
     });
   }
 
@@ -233,7 +257,8 @@ export class Viewer {
       MAX_RECONNECT_DELAY_MS,
     );
 
-    this.setState("reconnecting");
+    this.setState("stale");
+    this.clearHeartbeatTimers();
     this.clearReconnectTimer();
 
     this.reconnectTimer = window.setTimeout(() => {
@@ -266,7 +291,76 @@ export class Viewer {
     }
   }
 
+  private startHeartbeatLoop(): void {
+    this.clearHeartbeatTimers();
+    this.bumpHeartbeatTimeout();
+
+    this.heartbeatIntervalTimer = window.setInterval(() => {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.ready) {
+        return;
+      }
+
+      this.heartbeatSeq += 1;
+      try {
+        const heartbeatPacket = encodeHeartbeat(this.heartbeatSeq);
+        this.socket.send(heartbeatPacket.buffer as ArrayBuffer);
+      } catch (err) {
+        console.error("failed to send heartbeat:", err);
+        this.setState("stale");
+        this.socket.close();
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private bumpHeartbeatTimeout(): void {
+    if (!this.ready) {
+      return;
+    }
+
+    if (this.heartbeatTimeoutTimer !== null) {
+      window.clearTimeout(this.heartbeatTimeoutTimer);
+    }
+
+    this.heartbeatTimeoutTimer = window.setTimeout(() => {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      console.warn("viewer heartbeat timeout; reconnecting");
+      this.setState("stale");
+      this.socket.close();
+    }, HEARTBEAT_TIMEOUT_MS);
+  }
+
+  private clearHeartbeatTimers(): void {
+    if (this.heartbeatIntervalTimer !== null) {
+      window.clearInterval(this.heartbeatIntervalTimer);
+      this.heartbeatIntervalTimer = null;
+    }
+
+    if (this.heartbeatTimeoutTimer !== null) {
+      window.clearTimeout(this.heartbeatTimeoutTimer);
+      this.heartbeatTimeoutTimer = null;
+    }
+  }
+
   private setState(state: ViewerConnectionState): void {
+    if (this.state !== state) {
+      const allowed = VALID_TRANSITIONS[this.state] ?? [];
+      if (!allowed.includes(state)) {
+        console.warn("viewer state transition rejected", {
+          from: this.state,
+          to: state,
+        });
+        return;
+      }
+
+      console.info("viewer state transitioned", {
+        from: this.state,
+        to: state,
+      });
+    }
+
     this.state = state;
     this.stateChangeHandler?.(state);
   }

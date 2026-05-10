@@ -46,6 +46,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	startSessionTelemetryLogger(ctx, registry, logger)
+	registry.StartCleanupLoop(ctx, session.DefaultCleanupInterval, session.DefaultIdleTTL, logger)
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -19,6 +19,11 @@ import (
 
 const wsSessionPathPrefix = "/ws/session/"
 
+var (
+	HeartbeatInterval = 5 * time.Second
+	StaleThreshold    = 15 * time.Second
+)
+
 type WSHandler struct {
 	Registry *session.Registry
 
@@ -85,9 +90,25 @@ func (h *WSHandler) HandleSessionWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.IsTokenExpired(time.Now()) {
+		_, expiresAt := s.TokenMetadata()
+		_ = s.MarkExpired("token expired at auth")
+		slog.Warn("websocket auth rejected", "errorCategory", "auth", "reason", "token_expired", "role", role, "sessionId", s.ID, "tokenExpiresAt", expiresAt)
+		sendErrorResponse(conn, "token_expired", "session token has expired")
+		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "token expired")
+		return
+	}
+
 	if !isAuthorized(s, role, token) {
 		slog.Warn("websocket auth rejected", "errorCategory", "auth", "reason", "invalid role or token", "role", role)
+		sendErrorResponse(conn, "auth_rejected", "invalid role or token")
 		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "invalid role or token")
+		return
+	}
+
+	if err := sendAckResponse(conn, 1); err != nil {
+		slog.Warn("websocket auth ack failed", "errorCategory", "transport", "reason", err.Error(), "role", role, "sessionId", s.ID)
+		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "auth ack failed")
 		return
 	}
 
@@ -115,7 +136,7 @@ func parseSessionID(path string) (string, bool) {
 }
 
 // readBinaryHandshake performs protocol negotiation: reads HELLO, sends ACK/ERROR,
-// reads AUTH, sends ACK/ERROR. Returns (role, token, error).
+// and reads AUTH. Returns (role, token, error).
 func readBinaryHandshake(conn *websocket.Conn) (session.Role, string, error) {
 	// Read HELLO packet
 	_, helloData, err := conn.ReadMessage()
@@ -144,19 +165,7 @@ func readBinaryHandshake(conn *websocket.Conn) (session.Role, string, error) {
 		return "", "", err
 	}
 
-	// Send ACK response to HELLO
-	ackPayload, _ := protocol.EncodeAck(protocol.AckPayload{SelectedVersion: protocol.ProtocolVersion})
-	ackHeader := protocol.Header{
-		Version:     protocol.ProtocolVersion,
-		PacketType:  protocol.PacketTypeAck,
-		Flags:       0,
-		Reserved:    0,
-		SequenceID:  0,
-		TimestampNs: 0,
-		PayloadLen:  uint32(len(ackPayload)),
-	}
-	ackPacket, _ := protocol.BuildPacket(ackHeader, ackPayload)
-	if err := conn.WriteMessage(websocket.BinaryMessage, ackPacket); err != nil {
+	if err := sendAckResponse(conn, 0); err != nil {
 		return "", "", fmt.Errorf("send HELLO ACK failed: %w", err)
 	}
 
@@ -189,23 +198,22 @@ func readBinaryHandshake(conn *websocket.Conn) (session.Role, string, error) {
 	role := session.Role(auth.Role)
 	token := auth.Token
 
-	// Send ACK response to AUTH
-	authAckPayload, _ := protocol.EncodeAck(protocol.AckPayload{SelectedVersion: protocol.ProtocolVersion})
-	authAckHeader := protocol.Header{
+	return role, token, nil
+}
+
+func sendAckResponse(conn *websocket.Conn, sequenceID uint32) error {
+	ackPayload, _ := protocol.EncodeAck(protocol.AckPayload{SelectedVersion: protocol.ProtocolVersion})
+	ackHeader := protocol.Header{
 		Version:     protocol.ProtocolVersion,
 		PacketType:  protocol.PacketTypeAck,
 		Flags:       0,
 		Reserved:    0,
-		SequenceID:  1,
+		SequenceID:  sequenceID,
 		TimestampNs: 0,
-		PayloadLen:  uint32(len(authAckPayload)),
+		PayloadLen:  uint32(len(ackPayload)),
 	}
-	authAckPacket, _ := protocol.BuildPacket(authAckHeader, authAckPayload)
-	if err := conn.WriteMessage(websocket.BinaryMessage, authAckPacket); err != nil {
-		return "", "", fmt.Errorf("send AUTH ACK failed: %w", err)
-	}
-
-	return role, token, nil
+	ackPacket, _ := protocol.BuildPacket(ackHeader, ackPayload)
+	return conn.WriteMessage(websocket.BinaryMessage, ackPacket)
 }
 
 // sendErrorResponse sends an ERROR packet to the peer.
@@ -225,6 +233,25 @@ func sendErrorResponse(conn *websocket.Conn, reason, detail string) {
 	}
 	errPacket, _ := protocol.BuildPacket(errHeader, errPayload)
 	_ = conn.WriteMessage(websocket.BinaryMessage, errPacket)
+}
+
+func sendHeartbeatResponse(conn *websocket.Conn, sequenceID uint32) error {
+	header := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeHeartbeat,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  sequenceID,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  0,
+	}
+
+	packet, err := protocol.BuildPacket(header, nil)
+	if err != nil {
+		return err
+	}
+
+	return conn.WriteMessage(websocket.BinaryMessage, packet)
 }
 
 func logProtocolRejection(reason, detail string) {

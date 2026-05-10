@@ -11,6 +11,7 @@ export const PAYLOAD_LEN_OFFSET = 16;
 export const PACKET_TYPE_HELLO = 0x01;
 export const PACKET_TYPE_AUTH = 0x02;
 export const PACKET_TYPE_FRAME = 0x03;
+export const PACKET_TYPE_HEARTBEAT = 0x04;
 export const PACKET_TYPE_ACK = 0x05;
 export const PACKET_TYPE_ERROR = 0x07;
 
@@ -142,6 +143,20 @@ export function encodeAuth(role: string, token: string): Uint8Array {
   packet.set(headerBytes);
   packet.set(payload, PROTOCOL_HEADER_SIZE);
   return packet;
+}
+
+export function encodeHeartbeat(sequenceId: number): Uint8Array {
+  const header: Header = {
+    version: PROTOCOL_VERSION,
+    packetType: PACKET_TYPE_HEARTBEAT,
+    flags: 0,
+    reserved: 0,
+    sequenceId,
+    timestampNs: BigInt(Date.now()) * 1000000n,
+    payloadLen: 0,
+  };
+
+  return encodeHeader(header);
 }
 
 export function decodeErrorPayload(payload: Uint8Array): { reason: string; detail: string } | null {
