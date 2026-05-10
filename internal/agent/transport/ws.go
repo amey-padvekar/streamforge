@@ -1,0 +1,268 @@
+package transport
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+const (
+	defaultMaxRetries  = 5
+	defaultBaseBackoff = 500 * time.Millisecond
+	defaultMaxBackoff  = 8 * time.Second
+)
+
+type authHandshake struct {
+	Role  string `json:"role"`
+	Token string `json:"token"`
+}
+
+// WSTransport sends frame packets from the agent to the server over WebSocket.
+type WSTransport struct {
+	wsURL     string
+	sessionID string
+	token     string
+
+	maxRetries  int
+	baseBackoff time.Duration
+	maxBackoff  time.Duration
+
+	logger *slog.Logger
+	dialer websocket.Dialer
+
+	mu     sync.Mutex
+	writeM sync.Mutex
+	conn   *websocket.Conn
+	closed bool
+}
+
+// NewWSTransport creates an agent WebSocket transport.
+func NewWSTransport(serverURL, sessionID, agentToken string, maxRetries int, logger *slog.Logger) (*WSTransport, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
+	if strings.TrimSpace(agentToken) == "" {
+		return nil, fmt.Errorf("agent token is required")
+	}
+
+	wsURL, err := buildSessionWSURL(serverURL, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if maxRetries < 0 {
+		maxRetries = defaultMaxRetries
+	}
+
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &WSTransport{
+		wsURL:       wsURL,
+		sessionID:   sessionID,
+		token:       agentToken,
+		maxRetries:  maxRetries,
+		baseBackoff: defaultBaseBackoff,
+		maxBackoff:  defaultMaxBackoff,
+		logger:      logger,
+		dialer:      websocket.Dialer{HandshakeTimeout: 5 * time.Second},
+	}, nil
+}
+
+// Connect establishes the initial WebSocket connection and sends auth handshake.
+func (t *WSTransport) Connect() error {
+	_, err := t.connectWithRetry()
+	return err
+}
+
+// Send writes a binary frame message, reconnecting with backoff if needed.
+func (t *WSTransport) Send(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+
+	for attempt := 0; attempt <= t.maxRetries; attempt++ {
+		conn, err := t.ensureConnected()
+		if err != nil {
+			return err
+		}
+
+		t.writeM.Lock()
+		err = conn.WriteMessage(websocket.BinaryMessage, data)
+		t.writeM.Unlock()
+		if err == nil {
+			return nil
+		}
+
+		t.logger.Warn("agent transport write failed; reconnecting", "sessionId", t.sessionID, "attempt", attempt+1, "error", err)
+		t.dropConn(conn)
+
+		if attempt == t.maxRetries {
+			return fmt.Errorf("send failed after %d attempts: %w", attempt+1, err)
+		}
+
+		t.sleepBackoff(attempt + 1)
+	}
+
+	return fmt.Errorf("send failed")
+}
+
+// Close shuts down the underlying WebSocket connection.
+func (t *WSTransport) Close() error {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil
+	}
+	t.closed = true
+	conn := t.conn
+	t.conn = nil
+	t.mu.Unlock()
+
+	if conn != nil {
+		return conn.Close()
+	}
+	return nil
+}
+
+func (t *WSTransport) ensureConnected() (*websocket.Conn, error) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil, errors.New("transport is closed")
+	}
+	if t.conn != nil {
+		conn := t.conn
+		t.mu.Unlock()
+		return conn, nil
+	}
+	t.mu.Unlock()
+
+	return t.connectWithRetry()
+}
+
+func (t *WSTransport) connectWithRetry() (*websocket.Conn, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= t.maxRetries; attempt++ {
+		conn, err := t.connectOnce()
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+
+		if attempt == t.maxRetries {
+			break
+		}
+
+		t.logger.Warn("agent reconnect attempt failed", "sessionId", t.sessionID, "attempt", attempt+1, "error", err)
+		t.sleepBackoff(attempt + 1)
+	}
+
+	return nil, fmt.Errorf("failed to connect after %d attempts: %w", t.maxRetries+1, lastErr)
+}
+
+func (t *WSTransport) connectOnce() (*websocket.Conn, error) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil, errors.New("transport is closed")
+	}
+	if t.conn != nil {
+		conn := t.conn
+		t.mu.Unlock()
+		return conn, nil
+	}
+	t.mu.Unlock()
+
+	conn, _, err := t.dialer.Dial(t.wsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("dial failed: %w", err)
+	}
+
+	if err := conn.WriteJSON(authHandshake{Role: "agent", Token: t.token}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("auth handshake failed: %w", err)
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		_ = conn.Close()
+		return nil, errors.New("transport is closed")
+	}
+	if t.conn != nil {
+		_ = conn.Close()
+		return t.conn, nil
+	}
+	t.conn = conn
+
+	t.logger.Info("agent websocket connected", "sessionId", t.sessionID, "url", t.wsURL)
+	return conn, nil
+}
+
+func (t *WSTransport) dropConn(candidate *websocket.Conn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.conn == candidate {
+		_ = t.conn.Close()
+		t.conn = nil
+	}
+}
+
+func (t *WSTransport) sleepBackoff(attempt int) {
+	d := t.baseBackoff
+	for i := 1; i < attempt; i++ {
+		d *= 2
+		if d >= t.maxBackoff {
+			d = t.maxBackoff
+			break
+		}
+	}
+	t.logger.Info("agent reconnect backoff", "sessionId", t.sessionID, "attempt", attempt, "wait", d.String())
+	time.Sleep(d)
+}
+
+func buildSessionWSURL(serverURL, sessionID string) (string, error) {
+	raw := strings.TrimSpace(serverURL)
+	if raw == "" {
+		return "", fmt.Errorf("server URL is required")
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid server URL %q: %w", raw, err)
+	}
+
+	if u.Scheme == "" {
+		u = &url.URL{Scheme: "ws", Host: raw}
+	}
+
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("unsupported server URL scheme %q", u.Scheme)
+	}
+
+	if strings.TrimSpace(u.Host) == "" {
+		return "", fmt.Errorf("server URL host is required")
+	}
+
+	basePath := strings.TrimRight(u.Path, "/")
+	u.Path = basePath + "/ws/session/" + url.PathEscape(sessionID)
+	u.RawQuery = ""
+	u.Fragment = ""
+
+	return u.String(), nil
+}
