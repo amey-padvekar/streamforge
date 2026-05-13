@@ -176,3 +176,38 @@ func TestExpireAndCloseClearsResidualViewerResources(t *testing.T) {
 		t.Fatalf("outbound channel should be closed")
 	}
 }
+
+func TestMetricsSnapshotIncludesViewerDropCounters(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	slow := make(chan []byte, 1)
+	fast := make(chan []byte, 1)
+
+	if ok := s.AddViewer("viewer-slow", nil, slow); !ok {
+		t.Fatalf("add slow viewer: expected success")
+	}
+	if ok := s.AddViewer("viewer-fast", nil, fast); !ok {
+		t.Fatalf("add fast viewer: expected success")
+	}
+
+	// Fill slow viewer queue so a new fanout enqueue drops for this viewer.
+	slow <- []byte("queued")
+
+	forwarded, dropped := s.EnqueueFrameForViewers([]byte("frame"))
+	if forwarded != 1 || dropped != 1 {
+		t.Fatalf("fanout result: got forwarded=%d dropped=%d want forwarded=1 dropped=1", forwarded, dropped)
+	}
+	s.AddDroppedFrames(dropped)
+
+	metrics := s.MetricsSnapshot()
+	if metrics.FramesDropped != 1 {
+		t.Fatalf("session dropped frames: got %d want 1", metrics.FramesDropped)
+	}
+	if got := metrics.ViewerDrops["viewer-slow"]; got != 1 {
+		t.Fatalf("slow viewer drops in metrics: got %d want 1", got)
+	}
+	if got := metrics.ViewerDrops["viewer-fast"]; got != 0 {
+		t.Fatalf("fast viewer drops in metrics: got %d want 0", got)
+	}
+}

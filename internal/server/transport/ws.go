@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"streamforge/internal/protocol"
+	"streamforge/internal/server/metrics"
 	"streamforge/internal/server/router"
 	"streamforge/internal/server/session"
 )
@@ -85,29 +86,33 @@ func (h *WSHandler) HandleSessionWS(w http.ResponseWriter, r *http.Request) {
 
 	role, token, err := readBinaryHandshake(conn)
 	if err != nil {
-		slog.Warn("websocket handshake rejected", "errorCategory", "protocol", "reason", err.Error())
+		metrics.IncTransportErrors("unknown", "protocol")
+		slog.Warn("websocket handshake rejected", "sessionId", s.ID, "role", "unknown", "frameId", 0, "packetType", 0, "queueDepth", 0, "framesDropped", s.DroppedFrames(), "errorCategory", "protocol", "reason", err.Error())
 		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "invalid auth handshake")
 		return
 	}
 
 	if s.IsTokenExpired(time.Now()) {
+		metrics.IncTransportErrors(string(role), "auth")
 		_, expiresAt := s.TokenMetadata()
 		_ = s.MarkExpired("token expired at auth")
-		slog.Warn("websocket auth rejected", "errorCategory", "auth", "reason", "token_expired", "role", role, "sessionId", s.ID, "tokenExpiresAt", expiresAt)
+		slog.Warn("websocket auth rejected", "sessionId", s.ID, "role", role, "frameId", 0, "packetType", protocol.PacketTypeAuth, "queueDepth", 0, "framesDropped", s.DroppedFrames(), "errorCategory", "auth", "reason", "token_expired", "tokenExpiresAt", expiresAt)
 		sendErrorResponse(conn, "token_expired", "session token has expired")
 		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "token expired")
 		return
 	}
 
 	if !isAuthorized(s, role, token) {
-		slog.Warn("websocket auth rejected", "errorCategory", "auth", "reason", "invalid role or token", "role", role)
+		metrics.IncTransportErrors(string(role), "auth")
+		slog.Warn("websocket auth rejected", "sessionId", s.ID, "role", role, "frameId", 0, "packetType", protocol.PacketTypeAuth, "queueDepth", 0, "framesDropped", s.DroppedFrames(), "errorCategory", "auth", "reason", "invalid role or token")
 		sendErrorResponse(conn, "auth_rejected", "invalid role or token")
 		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "invalid role or token")
 		return
 	}
 
 	if err := sendAckResponse(conn, 1); err != nil {
-		slog.Warn("websocket auth ack failed", "errorCategory", "transport", "reason", err.Error(), "role", role, "sessionId", s.ID)
+		metrics.IncTransportErrors(string(role), "transport")
+		slog.Warn("websocket auth ack failed", "sessionId", s.ID, "role", role, "frameId", 1, "packetType", protocol.PacketTypeAck, "queueDepth", 0, "framesDropped", s.DroppedFrames(), "errorCategory", "transport", "reason", err.Error())
 		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "auth ack failed")
 		return
 	}
@@ -118,6 +123,7 @@ func (h *WSHandler) HandleSessionWS(w http.ResponseWriter, r *http.Request) {
 	case session.RoleViewer:
 		h.ViewerHandler(s, conn)
 	default:
+		metrics.IncTransportErrors(string(role), "protocol")
 		closeWithProtocolError(conn, websocket.ClosePolicyViolation, "unsupported role")
 	}
 }
@@ -255,7 +261,7 @@ func sendHeartbeatResponse(conn *websocket.Conn, sequenceID uint32) error {
 }
 
 func logProtocolRejection(reason, detail string) {
-	slog.Warn("protocol packet rejected", "errorCategory", "protocol", "reason", reason, "detail", detail)
+	slog.Warn("protocol packet rejected", "sessionId", "unknown", "role", "unknown", "frameId", 0, "packetType", 0, "queueDepth", 0, "framesDropped", 0, "errorCategory", "protocol", "reason", reason, "detail", detail)
 }
 
 func isAuthorized(s *session.Session, role session.Role, token string) bool {
@@ -287,7 +293,8 @@ func defaultAgentFrameRouter(_ *session.Session, _ []byte) error {
 func (h *WSHandler) routeAgentFrame(s *session.Session, frame []byte) error {
 	forwarded, dropped := router.FanoutFrame(s, frame)
 	if dropped > 0 {
-		slog.Warn("viewer queue full, dropping frame", "sessionId", s.ID, "dropped", dropped, "forwarded", forwarded)
+		metrics.IncTransportErrors("server", metrics.ErrorCategoryBackpressure)
+		slog.Warn("viewer queue full, dropping frame", "sessionId", s.ID, "role", "server", "frameId", 0, "packetType", protocol.PacketTypeFrame, "queueDepth", dropped+forwarded, "framesDropped", dropped, "errorCategory", "backpressure", "forwarded", forwarded)
 	}
 
 	return nil

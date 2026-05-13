@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"streamforge/internal/server/metrics"
 	"streamforge/internal/server/router"
 	"streamforge/internal/server/session"
 	"streamforge/internal/server/transport"
@@ -22,6 +23,8 @@ func main() {
 	addr := resolveServerAddr()
 
 	registry := session.NewRegistry()
+	prometheusMetrics := metrics.NewPrometheus()
+	metrics.SetDefault(prometheusMetrics)
 	sessionHandler := router.NewSessionHandler(registry)
 	wsHandler := transport.NewWSHandler(registry)
 
@@ -33,6 +36,7 @@ func main() {
 	mux.HandleFunc("/api/sessions", sessionHandler.HandleSessions)
 	mux.HandleFunc("/api/sessions/", sessionHandler.HandleSessionMetrics)
 	mux.HandleFunc("/ws/session/", wsHandler.HandleSessionWS)
+	mux.Handle("/metrics", prometheusMetrics.Handler())
 
 	server := &http.Server{
 		Addr:              addr,
@@ -113,36 +117,41 @@ func startSessionTelemetryLogger(ctx context.Context, registry *session.Registry
 				alive := make(map[string]struct{}, len(sessions))
 
 				for _, s := range sessions {
-					metrics := s.MetricsSnapshot()
-					alive[metrics.SessionID] = struct{}{}
+					snapshot := s.MetricsSnapshot()
+					alive[snapshot.SessionID] = struct{}{}
+					metrics.SetViewersConnected(snapshot.SessionID, snapshot.ViewerCount)
 
-					prev, ok := states[metrics.SessionID]
+					prev, ok := states[snapshot.SessionID]
 					if !ok {
-						states[metrics.SessionID] = sessionFPSState{framesReceived: metrics.FramesReceived, lastAt: now}
+						metrics.SetSessionFPS(snapshot.SessionID, 0)
+						states[snapshot.SessionID] = sessionFPSState{framesReceived: snapshot.FramesReceived, lastAt: now}
 						continue
 					}
 
 					elapsed := now.Sub(prev.lastAt).Seconds()
 					fps := 0.0
-					if elapsed > 0 && metrics.FramesReceived >= prev.framesReceived {
-						fps = float64(metrics.FramesReceived-prev.framesReceived) / elapsed
+					if elapsed > 0 && snapshot.FramesReceived >= prev.framesReceived {
+						fps = float64(snapshot.FramesReceived-prev.framesReceived) / elapsed
 					}
+					metrics.SetSessionFPS(snapshot.SessionID, fps)
 
 					logger.Info(
 						"session telemetry",
-						"sessionId", metrics.SessionID,
+						"sessionId", snapshot.SessionID,
 						"fps", math.Round(fps*100)/100,
-						"framesReceived", metrics.FramesReceived,
-						"framesForwarded", metrics.FramesForwarded,
-						"framesDropped", metrics.FramesDropped,
-						"viewerCount", metrics.ViewerCount,
+						"framesReceived", snapshot.FramesReceived,
+						"framesForwarded", snapshot.FramesForwarded,
+						"framesDropped", snapshot.FramesDropped,
+						"viewerCount", snapshot.ViewerCount,
 					)
 
-					states[metrics.SessionID] = sessionFPSState{framesReceived: metrics.FramesReceived, lastAt: now}
+					states[snapshot.SessionID] = sessionFPSState{framesReceived: snapshot.FramesReceived, lastAt: now}
 				}
 
 				for sessionID := range states {
 					if _, ok := alive[sessionID]; !ok {
+						metrics.SetSessionFPS(sessionID, 0)
+						metrics.SetViewersConnected(sessionID, 0)
 						delete(states, sessionID)
 					}
 				}

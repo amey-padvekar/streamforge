@@ -83,8 +83,22 @@ const fpsInterval = window.setInterval(() => {
   dimensionsValue.textContent = renderer.getFrameDimensions();
 }, 1000);
 
+const viewerLatencyInterval = window.setInterval(() => {
+  console.info("viewer latency telemetry", {
+    sessionId: sessionIdInput.value.trim() || "unknown",
+    role: "viewer",
+    frameId: 0,
+    packetType: "frame",
+    queueDepth: 0,
+    framesDropped: renderer.getDroppedFrames(),
+    errorCategory: "internal",
+    latency: renderer.getLatencySnapshot(),
+  });
+}, 5000);
+
 window.addEventListener("beforeunload", () => {
   window.clearInterval(fpsInterval);
+  window.clearInterval(viewerLatencyInterval);
   viewer?.disconnect();
 });
 

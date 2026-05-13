@@ -46,6 +46,7 @@ func (r *Registry) Create() *Session {
 		state:          SessionStatePending,
 		agentState:     ConnectionStateDisconnected,
 		agentLastSeen:  now,
+		viewerDropped:  make(map[string]uint64),
 		viewerStates:   make(map[string]ConnectionState),
 		viewerLastSeen: make(map[string]time.Time),
 		CreatedAt:      now,

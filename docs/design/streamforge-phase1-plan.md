@@ -579,19 +579,21 @@ These are intentional deferred items, not bugs:
 
 ## Phase 1 Completion Checklist
 
-- [ ] `go get gorilla/websocket` and `golang.org/x/sys/windows` added
-- [ ] Session registry implemented with create/get/delete
-- [ ] `POST /api/sessions` returns valid credentials
-- [ ] WebSocket endpoint accepts agent and viewer connections
-- [ ] Agent auth handshake validated server-side
-- [ ] GDI capture produces valid `image.RGBA` frames
-- [ ] JPEG encoding produces valid output files
-- [ ] Binary frame envelope encodes and decodes correctly
-- [ ] Agent scheduler runs at target FPS
-- [ ] Server fan-out delivers frames to all viewers
-- [ ] Browser viewer parses frame header correctly
-- [ ] Browser canvas renders live JPEG frames
-- [ ] FPS visible in browser overlay
-- [ ] Session metrics endpoint returns live counters
-- [ ] Full integration test sequence passes
-- [ ] No memory growth observed over 2+ minutes of streaming
+Status: Completed (2026-05-10)
+
+- [x] `go get gorilla/websocket` and `golang.org/x/sys/windows` added
+- [x] Session registry implemented with create/get/delete
+- [x] `POST /api/sessions` returns valid credentials
+- [x] WebSocket endpoint accepts agent and viewer connections
+- [x] Agent auth handshake validated server-side
+- [x] GDI capture produces valid `image.RGBA` frames
+- [x] JPEG encoding produces valid output files
+- [x] Binary frame envelope encodes and decodes correctly
+- [x] Agent scheduler runs at target FPS
+- [x] Server fan-out delivers frames to all viewers
+- [x] Browser viewer parses frame header correctly
+- [x] Browser canvas renders live JPEG frames
+- [x] FPS visible in browser overlay
+- [x] Session metrics endpoint returns live counters
+- [x] Full integration test sequence passes
+- [x] No memory growth observed over 2+ minutes of streaming

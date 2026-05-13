@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"streamforge/internal/protocol"
+	"streamforge/internal/server/metrics"
 	"streamforge/internal/server/session"
 )
 
@@ -22,6 +23,8 @@ func (h *WSHandler) handleViewerConnection(s *session.Session, conn *websocket.C
 	var writeMu sync.Mutex
 
 	if !s.AddViewer(viewerID, conn, outbound) {
+		metrics.IncTransportErrors(string(session.RoleViewer), "internal")
+		slog.Warn("viewer registration failed", "sessionId", s.ID, "role", session.RoleViewer, "frameId", 0, "packetType", protocol.PacketTypeAuth, "queueDepth", len(outbound), "framesDropped", s.DroppedFrames(), "errorCategory", "internal", "reason", "viewer_registration_failed")
 		closeWithProtocolError(conn, websocket.CloseInternalServerErr, "failed to register viewer")
 		return
 	}
@@ -36,9 +39,10 @@ func (h *WSHandler) handleViewerConnection(s *session.Session, conn *websocket.C
 			if err != nil {
 				var netErr net.Error
 				if errors.As(err, &netErr) && netErr.Timeout() {
+					metrics.IncTransportErrors(string(session.RoleViewer), "timeout")
 					idleFor := s.ViewerIdleDuration(viewerID, time.Now())
 					_ = s.SetViewerConnectionState(viewerID, session.ConnectionStateStale, "viewer heartbeat timeout")
-					slog.Warn("viewer stale timeout", "sessionId", s.ID, "viewerId", viewerID, "errorCategory", "timeout", "reason", "viewer_stale_timeout", "idleFor", idleFor.String(), "threshold", StaleThreshold.String())
+					slog.Warn("viewer stale timeout", "sessionId", s.ID, "role", session.RoleViewer, "viewerId", viewerID, "frameId", 0, "packetType", protocol.PacketTypeHeartbeat, "queueDepth", len(outbound), "framesDropped", s.DroppedFrames(), "errorCategory", "timeout", "reason", "viewer_stale_timeout", "idleFor", idleFor.String(), "threshold", StaleThreshold.String())
 					sendErrorResponse(conn, "timeout", "viewer heartbeat timeout")
 					closeWithProtocolError(conn, websocket.ClosePolicyViolation, "viewer heartbeat timeout")
 				}
@@ -52,7 +56,8 @@ func (h *WSHandler) handleViewerConnection(s *session.Session, conn *websocket.C
 
 			header, _, err := protocol.ParsePacket(packet)
 			if err != nil {
-				slog.Warn("viewer control packet rejected", "sessionId", s.ID, "viewerId", viewerID, "errorCategory", "protocol", "reason", err.Error())
+				metrics.IncTransportErrors(string(session.RoleViewer), "protocol")
+				slog.Warn("viewer control packet rejected", "sessionId", s.ID, "role", session.RoleViewer, "viewerId", viewerID, "frameId", 0, "packetType", 0, "queueDepth", len(outbound), "framesDropped", s.DroppedFrames(), "errorCategory", "protocol", "reason", err.Error())
 				sendErrorResponse(conn, "parse_error", err.Error())
 				closeWithProtocolError(conn, websocket.CloseUnsupportedData, "invalid control packet")
 				return
@@ -61,7 +66,8 @@ func (h *WSHandler) handleViewerConnection(s *session.Session, conn *websocket.C
 			s.TouchViewerLastSeen(viewerID, time.Now())
 
 			if header.PacketType != protocol.PacketTypeHeartbeat {
-				slog.Warn("viewer control packet rejected", "sessionId", s.ID, "viewerId", viewerID, "errorCategory", "protocol", "reason", "unsupported_viewer_packet", "packetType", header.PacketType)
+				metrics.IncTransportErrors(string(session.RoleViewer), "protocol")
+				slog.Warn("viewer control packet rejected", "sessionId", s.ID, "role", session.RoleViewer, "viewerId", viewerID, "frameId", int64(header.SequenceID), "packetType", header.PacketType, "queueDepth", len(outbound), "framesDropped", s.DroppedFrames(), "errorCategory", "protocol", "reason", "unsupported_viewer_packet")
 				sendErrorResponse(conn, "unsupported_viewer_packet", "expected HEARTBEAT packet")
 				closeWithProtocolError(conn, websocket.CloseUnsupportedData, "unsupported packet type")
 				return
@@ -71,18 +77,19 @@ func (h *WSHandler) handleViewerConnection(s *session.Session, conn *websocket.C
 			err = sendHeartbeatResponse(conn, header.SequenceID)
 			writeMu.Unlock()
 			if err != nil {
-				slog.Warn("viewer heartbeat echo failed", "sessionId", s.ID, "viewerId", viewerID, "errorCategory", "transport", "error", err)
+				metrics.IncTransportErrors(string(session.RoleViewer), "transport")
+				slog.Warn("viewer heartbeat echo failed", "sessionId", s.ID, "role", session.RoleViewer, "viewerId", viewerID, "frameId", int64(header.SequenceID), "packetType", header.PacketType, "queueDepth", len(outbound), "framesDropped", s.DroppedFrames(), "errorCategory", "transport", "error", err)
 				return
 			}
 		}
 	}()
 
-	slog.Info("viewer connected", "sessionId", s.ID, "viewerId", viewerID)
+	slog.Info("viewer connected", "sessionId", s.ID, "role", session.RoleViewer, "viewerId", viewerID, "queueDepth", len(outbound), "framesDropped", s.DroppedFrames())
 	defer func() {
 		s.RemoveViewer(viewerID)
 		for range outbound {
 		}
-		slog.Info("viewer disconnected", "sessionId", s.ID, "viewerId", viewerID)
+		slog.Info("viewer disconnected", "sessionId", s.ID, "role", session.RoleViewer, "viewerId", viewerID, "queueDepth", 0, "framesDropped", s.DroppedFrames())
 		_ = conn.Close()
 	}()
 
@@ -100,8 +107,9 @@ func (h *WSHandler) handleViewerConnection(s *session.Session, conn *websocket.C
 			writeMu.Lock()
 			if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 				writeMu.Unlock()
+				metrics.IncTransportErrors(string(session.RoleViewer), "transport")
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					slog.Warn("viewer write failed", "sessionId", s.ID, "viewerId", viewerID, "error", err)
+					slog.Warn("viewer write failed", "sessionId", s.ID, "role", session.RoleViewer, "viewerId", viewerID, "frameId", 0, "packetType", protocol.PacketTypeFrame, "queueDepth", len(outbound), "framesDropped", s.DroppedFrames(), "errorCategory", "transport", "error", err)
 				}
 				return
 			}

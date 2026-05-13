@@ -145,7 +145,7 @@ func (t *WSTransport) Send(data []byte) error {
 			return nil
 		}
 
-		t.logger.Warn("agent transport write failed; reconnecting", "sessionId", t.sessionID, "attempt", attempt+1, "error", err)
+		t.logger.Warn("agent transport write failed; reconnecting", "sessionId", t.sessionID, "role", "agent", "frameId", 0, "packetType", protocol.PacketTypeFrame, "queueDepth", 0, "framesDropped", 0, "errorCategory", "transport", "attempt", attempt+1, "error", err)
 		_ = t.setState(ConnectionStateStale, "frame send failed")
 		t.dropConn(conn)
 
@@ -203,7 +203,7 @@ func (t *WSTransport) connectWithRetry() (*websocket.Conn, error) {
 	wasReconnect := t.wasConnectedBefore()
 	_ = t.setState(ConnectionStateConnecting, "connecting to websocket")
 	if wasReconnect {
-		t.logger.Info("agent reconnect started", "sessionId", t.sessionID)
+		t.logger.Info("agent reconnect started", "sessionId", t.sessionID, "role", "agent")
 	}
 
 	for attempt := 0; attempt <= t.maxRetries; attempt++ {
@@ -217,12 +217,12 @@ func (t *WSTransport) connectWithRetry() (*websocket.Conn, error) {
 			break
 		}
 
-		t.logger.Warn("agent reconnect attempt failed", "sessionId", t.sessionID, "attempt", attempt+1, "error", err)
+		t.logger.Warn("agent reconnect attempt failed", "sessionId", t.sessionID, "role", "agent", "frameId", 0, "packetType", 0, "queueDepth", 0, "framesDropped", 0, "errorCategory", "transport", "attempt", attempt+1, "error", err)
 		t.sleepBackoff(attempt + 1)
 	}
 
 	if wasReconnect {
-		t.logger.Error("agent reconnect failed", "sessionId", t.sessionID, "maxRetries", t.maxRetries+1, "error", lastErr)
+		t.logger.Error("agent reconnect failed", "sessionId", t.sessionID, "role", "agent", "frameId", 0, "packetType", 0, "queueDepth", 0, "framesDropped", 0, "errorCategory", "transport", "maxRetries", t.maxRetries+1, "error", lastErr)
 	}
 	_ = t.setState(ConnectionStateStale, "connect retries exhausted")
 
@@ -396,9 +396,9 @@ func (t *WSTransport) connectOnce() (*websocket.Conn, error) {
 	t.mu.Unlock()
 
 	if isReconnect {
-		t.logger.Info("agent websocket reconnected", "sessionId", t.sessionID, "url", t.wsURL, "reconnectCount", reconnectCount)
+		t.logger.Info("agent websocket reconnected", "sessionId", t.sessionID, "role", "agent", "url", t.wsURL, "reconnectCount", reconnectCount)
 	} else {
-		t.logger.Info("agent websocket connected", "sessionId", t.sessionID, "url", t.wsURL)
+		t.logger.Info("agent websocket connected", "sessionId", t.sessionID, "role", "agent", "url", t.wsURL)
 	}
 	_ = t.setState(ConnectionStateStreaming, "connection ready for frame streaming")
 	t.startConnectionMonitors(conn)
@@ -443,7 +443,7 @@ func (t *WSTransport) runHeartbeatSender(conn *websocket.Conn, done <-chan struc
 			return
 		case <-ticker.C:
 			if err := t.sendHeartbeat(conn); err != nil {
-				t.logger.Warn("agent heartbeat send failed", "sessionId", t.sessionID, "errorCategory", "timeout", "reason", "heartbeat_send_failed", "error", err)
+				t.logger.Warn("agent heartbeat send failed", "sessionId", t.sessionID, "role", "agent", "frameId", 0, "packetType", protocol.PacketTypeHeartbeat, "queueDepth", 0, "framesDropped", 0, "errorCategory", "timeout", "reason", "heartbeat_send_failed", "error", err)
 				_ = t.setState(ConnectionStateStale, "heartbeat send failed")
 				t.dropConn(conn)
 				return
@@ -465,7 +465,7 @@ func (t *WSTransport) runHeartbeatReceiver(conn *websocket.Conn, done <-chan str
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				t.logger.Warn("agent heartbeat timeout", "sessionId", t.sessionID, "errorCategory", "timeout", "reason", "server_heartbeat_timeout", "threshold", heartbeatTimeout.String())
+				t.logger.Warn("agent heartbeat timeout", "sessionId", t.sessionID, "role", "agent", "frameId", 0, "packetType", protocol.PacketTypeHeartbeat, "queueDepth", 0, "framesDropped", 0, "errorCategory", "timeout", "reason", "server_heartbeat_timeout", "threshold", heartbeatTimeout.String())
 				_ = t.setState(ConnectionStateStale, "server heartbeat timeout")
 				t.dropConn(conn)
 				return
@@ -490,9 +490,9 @@ func (t *WSTransport) runHeartbeatReceiver(conn *websocket.Conn, done <-chan str
 		case protocol.PacketTypeError:
 			errPayload, parseErr := protocol.DecodeError(payload)
 			if parseErr == nil {
-				t.logger.Warn("agent received protocol error", "sessionId", t.sessionID, "errorCategory", "protocol", "reason", errPayload.Reason, "detail", errPayload.Detail)
+				t.logger.Warn("agent received protocol error", "sessionId", t.sessionID, "role", "agent", "frameId", int64(header.SequenceID), "packetType", header.PacketType, "queueDepth", 0, "framesDropped", 0, "errorCategory", "protocol", "reason", errPayload.Reason, "detail", errPayload.Detail)
 			} else {
-				t.logger.Warn("agent received malformed protocol error", "sessionId", t.sessionID, "errorCategory", "protocol")
+				t.logger.Warn("agent received malformed protocol error", "sessionId", t.sessionID, "role", "agent", "frameId", int64(header.SequenceID), "packetType", header.PacketType, "queueDepth", 0, "framesDropped", 0, "errorCategory", "protocol")
 			}
 			_ = t.setState(ConnectionStateStale, "server protocol error")
 			t.dropConn(conn)
@@ -536,11 +536,11 @@ func (t *WSTransport) setState(next ConnectionState, reason string) bool {
 	}
 
 	if !isValidConnectionTransition(t.state, next) {
-		t.logger.Warn("agent connection state transition rejected", "sessionId", t.sessionID, "from", t.state, "to", next, "errorCategory", "state", "reason", reason)
+		t.logger.Warn("agent connection state transition rejected", "sessionId", t.sessionID, "role", "agent", "frameId", 0, "packetType", 0, "queueDepth", 0, "framesDropped", 0, "errorCategory", "internal", "from", t.state, "to", next, "reason", reason)
 		return false
 	}
 
-	t.logger.Info("agent connection state transitioned", "sessionId", t.sessionID, "from", t.state, "to", next, "reason", reason)
+	t.logger.Info("agent connection state transitioned", "sessionId", t.sessionID, "role", "agent", "from", t.state, "to", next, "reason", reason)
 	t.state = next
 	return true
 }
@@ -563,8 +563,15 @@ func (t *WSTransport) sleepBackoff(attempt int) {
 			break
 		}
 	}
-	t.logger.Info("agent reconnect backoff", "sessionId", t.sessionID, "attempt", attempt, "wait", d.String())
+	t.logger.Info("agent reconnect backoff", "sessionId", t.sessionID, "role", "agent", "attempt", attempt, "wait", d.String())
 	time.Sleep(d)
+}
+
+func (t *WSTransport) SessionID() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.sessionID
 }
 
 func buildSessionWSURL(serverURL, sessionID string) (string, error) {

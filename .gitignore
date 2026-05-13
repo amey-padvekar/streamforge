@@ -26,3 +26,4 @@ dist/
 # Editor and OS clutter
 .DS_Store
 Thumbs.db
+docs/design/streamforge-phase1-plan.md

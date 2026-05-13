@@ -58,6 +58,19 @@ export class Viewer {
   private authed = false;
   private ready = false;
 
+  private logFields(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+    return {
+      sessionId: this.sessionId,
+      role: "viewer",
+      frameId: 0,
+      packetType: 0,
+      queueDepth: 0,
+      framesDropped: this.renderer.getDroppedFrames(),
+      errorCategory: "internal",
+      ...overrides,
+    };
+  }
+
   constructor(options: ViewerOptions) {
     this.serverUrl = options.serverUrl;
     this.sessionId = options.sessionId;
@@ -122,7 +135,7 @@ export class Viewer {
         const helloPacket = encodeHello("viewer", 1, 0);
         socket.send(helloPacket.buffer as ArrayBuffer);
       } catch (err) {
-        console.error("failed to encode HELLO:", err);
+        console.error("failed to encode HELLO", this.logFields({ packetType: "hello", errorCategory: "protocol", error: err }));
         this.setState("stale");
         socket.close();
       }
@@ -166,7 +179,7 @@ export class Viewer {
 
   private handleBinaryMessage(buffer: ArrayBuffer): void {
     if (buffer.byteLength < PROTOCOL_HEADER_SIZE) {
-      console.error("message too short for header");
+      console.error("message too short for header", this.logFields({ errorCategory: "protocol" }));
       return;
     }
 
@@ -184,7 +197,7 @@ export class Viewer {
             this.socket.send(authPacket.buffer as ArrayBuffer);
           }
         } catch (err) {
-          console.error("failed to encode AUTH:", err);
+          console.error("failed to encode AUTH", this.logFields({ packetType: "auth", errorCategory: "protocol", error: err }));
           this.setState("stale");
           if (this.socket) {
             this.socket.close();
@@ -193,13 +206,13 @@ export class Viewer {
       } else if (packetType === PACKET_TYPE_ERROR) {
         const payload = new Uint8Array(buffer, PROTOCOL_HEADER_SIZE);
         const error = decodeErrorPayload(payload);
-        console.error("server rejected HELLO:", error?.reason, error?.detail);
+        console.error("server rejected HELLO", this.logFields({ packetType, errorCategory: "auth", reason: error?.reason, detail: error?.detail }));
         this.setState("stale");
         if (this.socket) {
           this.socket.close();
         }
       } else {
-        console.warn("ignoring unsupported handshake packet before AUTH", { packetType });
+        console.warn("ignoring unsupported handshake packet before AUTH", this.logFields({ packetType, errorCategory: "protocol" }));
       }
       return;
     }
@@ -214,13 +227,13 @@ export class Viewer {
       } else if (packetType === PACKET_TYPE_ERROR) {
         const payload = new Uint8Array(buffer, PROTOCOL_HEADER_SIZE);
         const error = decodeErrorPayload(payload);
-        console.error("server rejected AUTH:", error?.reason, error?.detail);
+        console.error("server rejected AUTH", this.logFields({ packetType, errorCategory: "auth", reason: error?.reason, detail: error?.detail }));
         this.setState("stale");
         if (this.socket) {
           this.socket.close();
         }
       } else {
-        console.warn("ignoring unsupported handshake packet after AUTH", { packetType });
+        console.warn("ignoring unsupported handshake packet after AUTH", this.logFields({ packetType, errorCategory: "protocol" }));
       }
       return;
     }
@@ -237,14 +250,17 @@ export class Viewer {
   }
 
   private enqueueRender(buffer: ArrayBuffer): void {
+    const receivedAt = performance.now();
     const header = parseFrameHeader(buffer);
     if (!header) {
+      console.warn("failed to parse frame header", this.logFields({ packetType: "frame", errorCategory: "protocol" }));
       return;
     }
 
     const jpeg = extractJpegPayload(buffer, header);
 
-    void this.renderer.render(jpeg, header.width, header.height).catch(() => {
+    void this.renderer.render(jpeg, header.width, header.height, receivedAt).catch((error: unknown) => {
+      console.warn("viewer render failed", this.logFields({ frameId: header.frameId, packetType: "frame", errorCategory: "internal", error }));
       this.setState("stale");
     });
   }
@@ -305,7 +321,7 @@ export class Viewer {
         const heartbeatPacket = encodeHeartbeat(this.heartbeatSeq);
         this.socket.send(heartbeatPacket.buffer as ArrayBuffer);
       } catch (err) {
-        console.error("failed to send heartbeat:", err);
+        console.error("failed to send heartbeat", this.logFields({ frameId: this.heartbeatSeq, packetType: "heartbeat", errorCategory: "transport", error: err }));
         this.setState("stale");
         this.socket.close();
       }
@@ -326,7 +342,7 @@ export class Viewer {
         return;
       }
 
-      console.warn("viewer heartbeat timeout; reconnecting");
+      console.warn("viewer heartbeat timeout; reconnecting", this.logFields({ packetType: "heartbeat", errorCategory: "timeout" }));
       this.setState("stale");
       this.socket.close();
     }, HEARTBEAT_TIMEOUT_MS);
@@ -348,17 +364,19 @@ export class Viewer {
     if (this.state !== state) {
       const allowed = VALID_TRANSITIONS[this.state] ?? [];
       if (!allowed.includes(state)) {
-        console.warn("viewer state transition rejected", {
+        console.warn("viewer state transition rejected", this.logFields({
+          errorCategory: "internal",
           from: this.state,
           to: state,
-        });
+        }));
         return;
       }
 
-      console.info("viewer state transitioned", {
+      console.info("viewer state transitioned", this.logFields({
+        errorCategory: "internal",
         from: this.state,
         to: state,
-      });
+      }));
     }
 
     this.state = state;

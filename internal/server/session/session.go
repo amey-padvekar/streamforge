@@ -56,6 +56,7 @@ type Session struct {
 	idleSince     time.Time
 
 	viewerOutbound  map[string]chan []byte
+	viewerDropped   map[string]uint64
 	viewerStates    map[string]ConnectionState
 	viewerLastSeen  map[string]time.Time
 	framesReceived  uint64
@@ -72,6 +73,7 @@ type MetricsSnapshot struct {
 	FramesForwarded uint64
 	FramesDropped   uint64
 	ViewerCount     int
+	ViewerDrops     map[string]uint64
 }
 
 var validSessionTransitions = map[SessionState]map[SessionState]struct{}{
@@ -265,6 +267,9 @@ func (s *Session) ExpireAndClose(reason string) {
 			close(outbound)
 		}
 	}
+	for viewerID := range s.viewerDropped {
+		delete(s.viewerDropped, viewerID)
+	}
 
 	s.idleSince = nowOrFallback(s.idleSince)
 	_ = s.transitionSessionStateLocked(SessionStateExpired, reason)
@@ -295,7 +300,7 @@ func (s *Session) SetViewerConnectionState(viewerID string, next ConnectionState
 
 	current, exists := s.viewerStates[viewerID]
 	if !exists {
-		slog.Warn("viewer connection state transition rejected", "sessionId", s.ID, "viewerId", viewerID, "errorCategory", "state", "reason", "viewer not registered", "to", next)
+		slog.Warn("viewer connection state transition rejected", "sessionId", s.ID, "viewerId", viewerID, "errorCategory", "internal", "reason", "viewer not registered", "to", next)
 		return false
 	}
 
@@ -344,6 +349,9 @@ func (s *Session) AddViewer(viewerID string, conn *websocket.Conn, outbound chan
 	if s.viewerStates == nil {
 		s.viewerStates = make(map[string]ConnectionState)
 	}
+	if s.viewerDropped == nil {
+		s.viewerDropped = make(map[string]uint64)
+	}
 	if s.viewerLastSeen == nil {
 		s.viewerLastSeen = make(map[string]time.Time)
 	}
@@ -351,6 +359,7 @@ func (s *Session) AddViewer(viewerID string, conn *websocket.Conn, outbound chan
 	s.Viewers[viewerID] = conn
 	s.viewerOutbound[viewerID] = outbound
 	s.viewerStates[viewerID] = ConnectionStateConnecting
+	s.viewerDropped[viewerID] = 0
 	s.viewerLastSeen[viewerID] = time.Now()
 	slog.Info("viewer connection state transitioned", "sessionId", s.ID, "viewerId", viewerID, "from", ConnectionStateDisconnected, "to", ConnectionStateConnecting, "reason", "viewer registered")
 	s.recomputeSessionStateLocked("viewer attached")
@@ -373,24 +382,38 @@ func (s *Session) RemoveViewer(viewerID string) {
 		}
 		delete(s.viewerStates, viewerID)
 	}
+	delete(s.viewerDropped, viewerID)
 	delete(s.viewerLastSeen, viewerID)
 	s.recomputeSessionStateLocked("viewer detached")
 }
 
 func (s *Session) EnqueueFrameForViewers(frame []byte) (forwarded int, dropped int) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	for _, outbound := range s.viewerOutbound {
+	for viewerID, outbound := range s.viewerOutbound {
 		select {
 		case outbound <- frame:
 			forwarded++
 		default:
 			dropped++
+			s.viewerDropped[viewerID]++
 		}
 	}
 
 	return forwarded, dropped
+}
+
+func (s *Session) ViewerDroppedFrames() map[string]uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make(map[string]uint64, len(s.viewerDropped))
+	for viewerID, count := range s.viewerDropped {
+		out[viewerID] = count
+	}
+
+	return out
 }
 
 func (s *Session) AddReceivedFrames(count int) {
@@ -434,6 +457,11 @@ func (s *Session) MetricsSnapshot() MetricsSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	viewerDrops := make(map[string]uint64, len(s.viewerDropped))
+	for viewerID, count := range s.viewerDropped {
+		viewerDrops[viewerID] = count
+	}
+
 	return MetricsSnapshot{
 		SessionID:       s.ID,
 		State:           s.state,
@@ -441,6 +469,7 @@ func (s *Session) MetricsSnapshot() MetricsSnapshot {
 		FramesForwarded: s.framesForwarded,
 		FramesDropped:   s.droppedFrames,
 		ViewerCount:     len(s.Viewers),
+		ViewerDrops:     viewerDrops,
 	}
 }
 
@@ -450,7 +479,7 @@ func (s *Session) transitionConnectionStateLocked(role string, current Connectio
 	}
 
 	if !isValidTransition(validConnectionTransitions, current, next) {
-		slog.Warn("connection state transition rejected", "sessionId", s.ID, "role", role, "viewerId", viewerID, "from", current, "to", next, "errorCategory", "state", "reason", reason)
+		slog.Warn("connection state transition rejected", "sessionId", s.ID, "role", role, "viewerId", viewerID, "from", current, "to", next, "errorCategory", "internal", "reason", reason)
 		return false
 	}
 
@@ -464,7 +493,7 @@ func (s *Session) transitionSessionStateLocked(next SessionState, reason string)
 	}
 
 	if !isValidTransition(validSessionTransitions, s.state, next) {
-		slog.Warn("session state transition rejected", "sessionId", s.ID, "from", s.state, "to", next, "errorCategory", "state", "reason", reason)
+		slog.Warn("session state transition rejected", "sessionId", s.ID, "from", s.state, "to", next, "errorCategory", "internal", "reason", reason)
 		return false
 	}
 

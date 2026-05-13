@@ -73,6 +73,7 @@ func (h *SessionHandler) HandleSessionMetrics(w http.ResponseWriter, r *http.Req
 		"framesForwarded": metrics.FramesForwarded,
 		"framesDropped":   metrics.FramesDropped,
 		"viewerCount":     metrics.ViewerCount,
+		"viewerDrops":     metrics.ViewerDrops,
 	})
 }
 
