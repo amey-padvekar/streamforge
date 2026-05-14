@@ -211,3 +211,132 @@ func TestMetricsSnapshotIncludesViewerDropCounters(t *testing.T) {
 		t.Fatalf("fast viewer drops in metrics: got %d want 0", got)
 	}
 }
+
+func TestSessionStateTransitionsAcrossLifecycle(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	if got := s.State(); got != SessionStatePending {
+		t.Fatalf("initial state: got %q want %q", got, SessionStatePending)
+	}
+
+	agentConn := &websocket.Conn{}
+	if ok := s.TryAttachAgent(agentConn); !ok {
+		t.Fatalf("attach agent: expected success")
+	}
+	if got := s.State(); got != SessionStateActive {
+		t.Fatalf("state after agent attach: got %q want %q", got, SessionStateActive)
+	}
+
+	if ok := s.AddViewer("viewer-1", &websocket.Conn{}, make(chan []byte, 1)); !ok {
+		t.Fatalf("add viewer: expected success")
+	}
+	if got := s.State(); got != SessionStateActive {
+		t.Fatalf("state with agent+viewer: got %q want %q", got, SessionStateActive)
+	}
+
+	s.DetachAgent(agentConn)
+	if got := s.State(); got != SessionStateDegraded {
+		t.Fatalf("state after agent detach: got %q want %q", got, SessionStateDegraded)
+	}
+
+	s.RemoveViewer("viewer-1")
+	if got := s.State(); got != SessionStateClosed {
+		t.Fatalf("state after last viewer removed: got %q want %q", got, SessionStateClosed)
+	}
+
+	if ok := s.MarkExpired("lifecycle complete"); !ok {
+		t.Fatalf("mark expired: expected success")
+	}
+	if got := s.State(); got != SessionStateExpired {
+		t.Fatalf("state after mark expired: got %q want %q", got, SessionStateExpired)
+	}
+}
+
+func TestAgentHeartbeatStaleTransitionAndIdleDuration(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	if ok := s.SetAgentConnectionState(ConnectionStateConnecting, "connect start"); !ok {
+		t.Fatalf("set agent state to connecting: expected success")
+	}
+	if ok := s.SetAgentConnectionState(ConnectionStateAuthenticated, "auth ok"); !ok {
+		t.Fatalf("set agent state to authenticated: expected success")
+	}
+	if ok := s.SetAgentConnectionState(ConnectionStateStreaming, "stream start"); !ok {
+		t.Fatalf("set agent state to streaming: expected success")
+	}
+
+	now := time.Now()
+	lastSeen := now.Add(-16 * time.Second)
+	s.TouchAgentLastSeen(lastSeen)
+
+	idle := s.AgentIdleDuration(now)
+	if idle < 16*time.Second {
+		t.Fatalf("agent idle duration: got %s want at least %s", idle, 16*time.Second)
+	}
+
+	if ok := s.SetAgentConnectionState(ConnectionStateStale, "heartbeat timeout"); !ok {
+		t.Fatalf("set agent state to stale: expected success")
+	}
+	if got := s.AgentConnectionState(); got != ConnectionStateStale {
+		t.Fatalf("agent state after timeout: got %q want %q", got, ConnectionStateStale)
+	}
+}
+
+func TestViewerHeartbeatStaleTransitionAndIdleDuration(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	if ok := s.AddViewer("viewer-1", &websocket.Conn{}, make(chan []byte, 1)); !ok {
+		t.Fatalf("add viewer: expected success")
+	}
+	if ok := s.SetViewerConnectionState("viewer-1", ConnectionStateAuthenticated, "auth ok"); !ok {
+		t.Fatalf("set viewer state to authenticated: expected success")
+	}
+	if ok := s.SetViewerConnectionState("viewer-1", ConnectionStateStreaming, "stream start"); !ok {
+		t.Fatalf("set viewer state to streaming: expected success")
+	}
+
+	now := time.Now()
+	lastSeen := now.Add(-20 * time.Second)
+	s.TouchViewerLastSeen("viewer-1", lastSeen)
+
+	idle := s.ViewerIdleDuration("viewer-1", now)
+	if idle < 20*time.Second {
+		t.Fatalf("viewer idle duration: got %s want at least %s", idle, 20*time.Second)
+	}
+
+	if ok := s.SetViewerConnectionState("viewer-1", ConnectionStateStale, "heartbeat timeout"); !ok {
+		t.Fatalf("set viewer state to stale: expected success")
+	}
+}
+
+func TestTokenWithoutExpiryIsNotExpired(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	s.TokenExpiresAt = time.Time{}
+	if s.IsTokenExpired(time.Now().Add(24 * time.Hour)) {
+		t.Fatalf("token with zero expiry should never be considered expired")
+	}
+}
+
+func TestDuplicateJoinBehavior(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	if ok := s.TryAttachAgent(&websocket.Conn{}); !ok {
+		t.Fatalf("first agent attach: expected success")
+	}
+	if ok := s.TryAttachAgent(&websocket.Conn{}); ok {
+		t.Fatalf("second agent attach should be rejected")
+	}
+
+	if ok := s.AddViewer("viewer-dup", &websocket.Conn{}, make(chan []byte, 1)); !ok {
+		t.Fatalf("first viewer add: expected success")
+	}
+	if ok := s.AddViewer("viewer-dup", &websocket.Conn{}, make(chan []byte, 1)); ok {
+		t.Fatalf("duplicate viewer add should be rejected")
+	}
+}

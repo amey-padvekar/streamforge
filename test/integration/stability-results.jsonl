@@ -1,0 +1,14 @@
+{"scenario":"multiple_viewers","viewers":2,"framesSent":80,"framesReceived":160,"framesForwarded":160,"framesDropped":0,"dropRate":0,"latencyP50Ms":0,"latencyP95Ms":0.9939}
+{"scenario":"multiple_viewers","viewers":5,"framesSent":80,"framesReceived":399,"framesForwarded":399,"framesDropped":0,"dropRate":0,"latencyP50Ms":0.544,"latencyP95Ms":1.5716}
+{"scenario":"multiple_viewers","viewers":10,"framesSent":80,"framesReceived":800,"framesForwarded":800,"framesDropped":0,"dropRate":0,"latencyP50Ms":0.5292,"latencyP95Ms":2.052}
+{"scenario":"slow_viewer","viewers":3,"framesSent":250,"framesReceived":500,"framesForwarded":535,"framesDropped":215,"dropRate":0.2866666666666667,"latencyP50Ms":1.6454,"latencyP95Ms":3.0186}
+{"scenario":"reconnect_storm","viewers":1,"framesSent":25,"framesReceived":25,"framesForwarded":25,"framesDropped":0,"dropRate":0,"latencyP50Ms":0.5335,"latencyP95Ms":1.2042,"reconnectsTried":25,"reconnectsPassed":25}
+{"scenario":"slow_viewer","viewers":3,"framesSent":250,"framesReceived":500,"framesForwarded":535,"framesDropped":215,"dropRate":0.2866666666666667,"latencyP50Ms":1.6961,"latencyP95Ms":2.9998}
+{"scenario":"reconnect_storm","viewers":1,"framesSent":25,"framesReceived":25,"framesForwarded":25,"framesDropped":0,"dropRate":0,"latencyP50Ms":0,"latencyP95Ms":0.8402,"reconnectsTried":25,"reconnectsPassed":25}
+{"scenario":"soak","viewers":5,"framesSent":79918,"framesReceived":2756,"framesForwarded":2791,"framesDropped":79883,"dropRate":0.9662408979848561,"latencyP50Ms":2.2438,"latencyP95Ms":5.3538,"memoryGrowthMiB":2.8122787475585938,"durationSeconds":1800}
+{"scenario":"soak","viewers":5,"framesSent":78620,"framesReceived":2685,"framesForwarded":2721,"framesDropped":78585,"dropRate":0.966533835141318,"latencyP50Ms":3.4925,"latencyP95Ms":16.7716,"memoryGrowthMiB":3.5850601196289062,"durationSeconds":1800}
+{"scenario":"multiple_viewers","viewers":2,"framesSent":80,"framesReceived":160,"framesForwarded":160,"framesDropped":0,"dropRate":0,"latencyP50Ms":0.7098,"latencyP95Ms":1.138}
+{"scenario":"multiple_viewers","viewers":5,"framesSent":80,"framesReceived":400,"framesForwarded":400,"framesDropped":0,"dropRate":0,"latencyP50Ms":0.7465,"latencyP95Ms":2.0164}
+{"scenario":"multiple_viewers","viewers":10,"framesSent":80,"framesReceived":800,"framesForwarded":800,"framesDropped":0,"dropRate":0,"latencyP50Ms":0.9117,"latencyP95Ms":2.0153}
+{"scenario":"slow_viewer","viewers":3,"framesSent":250,"framesReceived":500,"framesForwarded":535,"framesDropped":215,"dropRate":0.2866666666666667,"latencyP50Ms":2.0945,"latencyP95Ms":4.2369}
+{"scenario":"reconnect_storm","viewers":1,"framesSent":25,"framesReceived":25,"framesForwarded":25,"framesDropped":0,"dropRate":0,"latencyP50Ms":0.6822,"latencyP95Ms":1.6452,"reconnectsTried":25,"reconnectsPassed":25}
