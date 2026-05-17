@@ -35,6 +35,21 @@ const (
 	ConnectionStateStale         ConnectionState = "stale"
 )
 
+type ViewerRole string
+
+const (
+	ViewerRoleViewOnly       ViewerRole = "view-only"
+	ViewerRoleControlEnabled ViewerRole = "control-enabled"
+	ViewerRoleOwner          ViewerRole = "owner"
+)
+
+type ViewerControlMetadata struct {
+	Role           ViewerRole
+	ControlEnabled bool
+	GrantedBy      string
+	GrantedAt      time.Time
+}
+
 type Session struct {
 	ID string
 
@@ -59,6 +74,15 @@ type Session struct {
 	viewerDropped   map[string]uint64
 	viewerStates    map[string]ConnectionState
 	viewerLastSeen  map[string]time.Time
+	viewerRoles     map[string]ViewerRole
+	viewerControl   map[string]bool
+	viewerGrantedBy map[string]string
+	viewerGrantedAt map[string]time.Time
+	viewerInputDrop map[string]uint64
+	inputDropReason map[string]uint64
+	viewerAbuse     map[string]uint64
+	agentInputQueue chan []byte
+	agentInputDrop  uint64
 	framesReceived  uint64
 	framesForwarded uint64
 	droppedFrames   uint64
@@ -155,6 +179,38 @@ func (s *Session) AgentConnectionState() ConnectionState {
 	return s.agentState
 }
 
+func (s *Session) HasViewer(viewerID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	_, ok := s.Viewers[viewerID]
+	return ok
+}
+
+func (s *Session) ViewerConnectionState(viewerID string) (ConnectionState, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	state, ok := s.viewerStates[viewerID]
+	return state, ok
+}
+
+func (s *Session) HasActiveAgent() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.AgentConn == nil {
+		return false
+	}
+
+	switch s.agentState {
+	case ConnectionStateAuthenticated, ConnectionStateStreaming:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Session) TokenMetadata() (issuedAt time.Time, expiresAt time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -189,6 +245,123 @@ func (s *Session) TouchViewerLastSeen(viewerID string, now time.Time) {
 	}
 
 	s.viewerLastSeen[viewerID] = now
+}
+
+func (s *Session) SetAgentInputQueue(queue chan []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.agentInputQueue = queue
+	s.agentInputDrop = 0
+}
+
+func (s *Session) RecordInputDrop(viewerID string, reason string) (viewerDrops uint64, reasonDrops uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.viewerInputDrop == nil {
+		s.viewerInputDrop = make(map[string]uint64)
+	}
+	if s.inputDropReason == nil {
+		s.inputDropReason = make(map[string]uint64)
+	}
+
+	if viewerID != "" {
+		s.viewerInputDrop[viewerID]++
+		viewerDrops = s.viewerInputDrop[viewerID]
+	}
+	if reason != "" {
+		s.inputDropReason[reason]++
+		reasonDrops = s.inputDropReason[reason]
+	}
+
+	return viewerDrops, reasonDrops
+}
+
+func (s *Session) RecordViewerAbuse(viewerID string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.viewerAbuse == nil {
+		s.viewerAbuse = make(map[string]uint64)
+	}
+
+	s.viewerAbuse[viewerID]++
+	return s.viewerAbuse[viewerID]
+}
+
+func (s *Session) ClearViewerAbuse(viewerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.viewerAbuse, viewerID)
+}
+
+func (s *Session) ClearAgentInputQueue(queue chan []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if queue != nil && s.agentInputQueue != queue {
+		return
+	}
+
+	if s.agentInputQueue != nil {
+		close(s.agentInputQueue)
+	}
+	s.agentInputQueue = nil
+}
+
+func (s *Session) EnqueueInputForAgent(packet []byte) (enqueued bool, dropped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.AgentConn == nil || s.agentInputQueue == nil {
+		return false, false
+	}
+
+	select {
+	case s.agentInputQueue <- packet:
+		return true, false
+	default:
+		s.agentInputDrop++
+		return false, true
+	}
+}
+
+func (s *Session) AgentInputDropCount() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.agentInputDrop
+}
+
+func (s *Session) ViewerControlMetadata(viewerID string) (ViewerControlMetadata, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	role, exists := s.viewerRoles[viewerID]
+	if !exists {
+		return ViewerControlMetadata{}, false
+	}
+
+	return ViewerControlMetadata{
+		Role:           role,
+		ControlEnabled: s.viewerControl[viewerID],
+		GrantedBy:      s.viewerGrantedBy[viewerID],
+		GrantedAt:      s.viewerGrantedAt[viewerID],
+	}, true
+}
+
+func (s *Session) SetViewerControlRole(viewerID string, role ViewerRole, grantedBy string, grantedAt time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.Viewers[viewerID]; !exists {
+		return false
+	}
+
+	s.setViewerControlMetadataLocked(viewerID, role, grantedBy, grantedAt)
+	return true
 }
 
 func (s *Session) AgentIdleDuration(now time.Time) time.Duration {
@@ -248,6 +421,10 @@ func (s *Session) ExpireAndClose(reason string) {
 		s.AgentConn = nil
 		s.agentState = ConnectionStateDisconnected
 	}
+	if s.agentInputQueue != nil {
+		close(s.agentInputQueue)
+		s.agentInputQueue = nil
+	}
 
 	for viewerID, conn := range s.Viewers {
 		if current, ok := s.viewerStates[viewerID]; ok && current != ConnectionStateDisconnected {
@@ -259,6 +436,10 @@ func (s *Session) ExpireAndClose(reason string) {
 		delete(s.Viewers, viewerID)
 		delete(s.viewerStates, viewerID)
 		delete(s.viewerLastSeen, viewerID)
+		delete(s.viewerRoles, viewerID)
+		delete(s.viewerControl, viewerID)
+		delete(s.viewerGrantedBy, viewerID)
+		delete(s.viewerGrantedAt, viewerID)
 	}
 
 	for viewerID, outbound := range s.viewerOutbound {
@@ -269,6 +450,15 @@ func (s *Session) ExpireAndClose(reason string) {
 	}
 	for viewerID := range s.viewerDropped {
 		delete(s.viewerDropped, viewerID)
+	}
+	for viewerID := range s.viewerInputDrop {
+		delete(s.viewerInputDrop, viewerID)
+	}
+	for viewerID := range s.viewerAbuse {
+		delete(s.viewerAbuse, viewerID)
+	}
+	for reason := range s.inputDropReason {
+		delete(s.inputDropReason, reason)
 	}
 
 	s.idleSince = nowOrFallback(s.idleSince)
@@ -331,6 +521,10 @@ func (s *Session) DetachAgent(conn *websocket.Conn) {
 
 	if conn == nil || s.AgentConn == conn {
 		s.AgentConn = nil
+		if s.agentInputQueue != nil {
+			close(s.agentInputQueue)
+			s.agentInputQueue = nil
+		}
 		s.recomputeSessionStateLocked("agent detached")
 	}
 }
@@ -355,12 +549,35 @@ func (s *Session) AddViewer(viewerID string, conn *websocket.Conn, outbound chan
 	if s.viewerLastSeen == nil {
 		s.viewerLastSeen = make(map[string]time.Time)
 	}
+	if s.viewerRoles == nil {
+		s.viewerRoles = make(map[string]ViewerRole)
+	}
+	if s.viewerControl == nil {
+		s.viewerControl = make(map[string]bool)
+	}
+	if s.viewerGrantedBy == nil {
+		s.viewerGrantedBy = make(map[string]string)
+	}
+	if s.viewerGrantedAt == nil {
+		s.viewerGrantedAt = make(map[string]time.Time)
+	}
+	if s.viewerInputDrop == nil {
+		s.viewerInputDrop = make(map[string]uint64)
+	}
+	if s.inputDropReason == nil {
+		s.inputDropReason = make(map[string]uint64)
+	}
+	if s.viewerAbuse == nil {
+		s.viewerAbuse = make(map[string]uint64)
+	}
 
 	s.Viewers[viewerID] = conn
 	s.viewerOutbound[viewerID] = outbound
 	s.viewerStates[viewerID] = ConnectionStateConnecting
 	s.viewerDropped[viewerID] = 0
+	s.viewerInputDrop[viewerID] = 0
 	s.viewerLastSeen[viewerID] = time.Now()
+	s.setViewerControlMetadataLocked(viewerID, ViewerRoleViewOnly, "", time.Time{})
 	slog.Info("viewer connection state transitioned", "sessionId", s.ID, "viewerId", viewerID, "from", ConnectionStateDisconnected, "to", ConnectionStateConnecting, "reason", "viewer registered")
 	s.recomputeSessionStateLocked("viewer attached")
 
@@ -384,7 +601,37 @@ func (s *Session) RemoveViewer(viewerID string) {
 	}
 	delete(s.viewerDropped, viewerID)
 	delete(s.viewerLastSeen, viewerID)
+	delete(s.viewerRoles, viewerID)
+	delete(s.viewerControl, viewerID)
+	delete(s.viewerGrantedBy, viewerID)
+	delete(s.viewerGrantedAt, viewerID)
+	delete(s.viewerInputDrop, viewerID)
+	delete(s.viewerAbuse, viewerID)
 	s.recomputeSessionStateLocked("viewer detached")
+}
+
+func (s *Session) setViewerControlMetadataLocked(viewerID string, role ViewerRole, grantedBy string, grantedAt time.Time) {
+	if s.viewerRoles == nil {
+		s.viewerRoles = make(map[string]ViewerRole)
+	}
+	if s.viewerControl == nil {
+		s.viewerControl = make(map[string]bool)
+	}
+	if s.viewerGrantedBy == nil {
+		s.viewerGrantedBy = make(map[string]string)
+	}
+	if s.viewerGrantedAt == nil {
+		s.viewerGrantedAt = make(map[string]time.Time)
+	}
+
+	s.viewerRoles[viewerID] = role
+	s.viewerControl[viewerID] = role == ViewerRoleControlEnabled || role == ViewerRoleOwner
+	s.viewerGrantedBy[viewerID] = grantedBy
+	if grantedAt.IsZero() {
+		delete(s.viewerGrantedAt, viewerID)
+		return
+	}
+	s.viewerGrantedAt[viewerID] = grantedAt
 }
 
 func (s *Session) EnqueueFrameForViewers(frame []byte) (forwarded int, dropped int) {

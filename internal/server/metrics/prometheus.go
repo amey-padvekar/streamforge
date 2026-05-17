@@ -36,6 +36,10 @@ type Prometheus struct {
 	framesReceived   *prometheus.CounterVec
 	framesForwarded  *prometheus.CounterVec
 	framesDropped    *prometheus.CounterVec
+	inputReceived    *prometheus.CounterVec
+	inputForwarded   *prometheus.CounterVec
+	inputDropped     *prometheus.CounterVec
+	controlDenied    *prometheus.CounterVec
 	viewersConnected *prometheus.GaugeVec
 	sessionFPS       *prometheus.GaugeVec
 	transportErrors  *prometheus.CounterVec
@@ -67,6 +71,34 @@ func NewPrometheus() *Prometheus {
 			prometheus.CounterOpts{
 				Name: "streamforge_frames_dropped_total",
 				Help: "Total number of dropped frames per session by reason.",
+			},
+			[]string{"session_id", "reason"},
+		),
+		inputReceived: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "streamforge_input_received_total",
+				Help: "Total number of INPUT packets received from viewers by event type.",
+			},
+			[]string{"session_id", "viewer_id", "event_type"},
+		),
+		inputForwarded: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "streamforge_input_forwarded_total",
+				Help: "Total number of INPUT packets forwarded to active agent by event type.",
+			},
+			[]string{"session_id", "event_type"},
+		),
+		inputDropped: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "streamforge_input_dropped_total",
+				Help: "Total number of dropped INPUT packets by reason.",
+			},
+			[]string{"session_id", "reason"},
+		),
+		controlDenied: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "streamforge_control_permission_denied_total",
+				Help: "Total number of control permission denials by reason.",
 			},
 			[]string{"session_id", "reason"},
 		),
@@ -107,6 +139,10 @@ func NewPrometheus() *Prometheus {
 		p.framesReceived,
 		p.framesForwarded,
 		p.framesDropped,
+		p.inputReceived,
+		p.inputForwarded,
+		p.inputDropped,
+		p.controlDenied,
 		p.viewersConnected,
 		p.sessionFPS,
 		p.transportErrors,
@@ -153,6 +189,42 @@ func IncFramesDropped(sessionID string, reason string, count int) {
 	}
 
 	p.framesDropped.WithLabelValues(sessionLabelValue(sessionID), stringLabelValue(reason)).Add(float64(count))
+}
+
+func IncInputReceived(sessionID string, viewerID string, eventType string, count int) {
+	p := defaultMetrics.Load()
+	if p == nil || count <= 0 {
+		return
+	}
+
+	p.inputReceived.WithLabelValues(sessionLabelValue(sessionID), stringLabelValue(viewerID), stringLabelValue(eventType)).Add(float64(count))
+}
+
+func IncInputForwarded(sessionID string, eventType string, count int) {
+	p := defaultMetrics.Load()
+	if p == nil || count <= 0 {
+		return
+	}
+
+	p.inputForwarded.WithLabelValues(sessionLabelValue(sessionID), stringLabelValue(eventType)).Add(float64(count))
+}
+
+func IncInputDropped(sessionID string, reason string, count int) {
+	p := defaultMetrics.Load()
+	if p == nil || count <= 0 {
+		return
+	}
+
+	p.inputDropped.WithLabelValues(sessionLabelValue(sessionID), stringLabelValue(reason)).Add(float64(count))
+}
+
+func IncControlPermissionDenied(sessionID string, reason string, count int) {
+	p := defaultMetrics.Load()
+	if p == nil || count <= 0 {
+		return
+	}
+
+	p.controlDenied.WithLabelValues(sessionLabelValue(sessionID), stringLabelValue(reason)).Add(float64(count))
 }
 
 func SetViewersConnected(sessionID string, count int) {

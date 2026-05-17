@@ -49,6 +49,13 @@ func (r *Registry) Create() *Session {
 		viewerDropped:  make(map[string]uint64),
 		viewerStates:   make(map[string]ConnectionState),
 		viewerLastSeen: make(map[string]time.Time),
+		viewerRoles:    make(map[string]ViewerRole),
+		viewerControl:  make(map[string]bool),
+		viewerGrantedBy: make(map[string]string),
+		viewerGrantedAt: make(map[string]time.Time),
+		viewerInputDrop: make(map[string]uint64),
+		inputDropReason: make(map[string]uint64),
+		viewerAbuse:     make(map[string]uint64),
 		CreatedAt:      now,
 	}
 

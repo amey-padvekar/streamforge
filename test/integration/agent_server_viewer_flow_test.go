@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"streamforge/internal/protocol"
+	"streamforge/internal/server/auth"
 	"streamforge/internal/server/metrics"
 	"streamforge/internal/server/router"
 	"streamforge/internal/server/session"
@@ -344,5 +345,166 @@ func TestAgentViewerFlow_DropCountersAndReconnectHandling(t *testing.T) {
 	}
 	if hdr.SequenceID != 999 {
 		t.Fatalf("reconnect viewer sequence: got %d want %d", hdr.SequenceID, 999)
+	}
+}
+
+func TestWorkstream3Validation_InputAuthFloodAndFrameHealth(t *testing.T) {
+	restoreLimiter := auth.SetInputRateLimitsForTesting(1, 1)
+	defer restoreLimiter()
+
+	h := newIntegrationHarness(t)
+	created := h.createSession(t)
+	wsURL := h.wsBaseURL() + "/ws/session/" + created.SessionID
+
+	agent := dialWS(t, wsURL)
+	defer agent.Close()
+	performHandshake(t, agent, "agent", created.AgentToken)
+
+	controlViewer := dialWS(t, wsURL)
+	defer controlViewer.Close()
+	performHandshake(t, controlViewer, "viewer", created.ViewerToken)
+
+	unauthorizedViewer := dialWS(t, wsURL)
+	defer unauthorizedViewer.Close()
+	performHandshake(t, unauthorizedViewer, "viewer", created.ViewerToken)
+
+	s, ok := h.registry.Get(created.SessionID)
+	if !ok {
+		t.Fatalf("session %s not found in registry", created.SessionID)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		return s.HasViewer("viewer-1") && s.HasViewer("viewer-2")
+	}, "expected viewer-1 and viewer-2 to be attached")
+
+	if ok := s.SetViewerControlRole("viewer-1", session.ViewerRoleControlEnabled, "owner-1", time.Now()); !ok {
+		t.Fatalf("grant control role to viewer-1: expected success")
+	}
+
+	buildInput := func(seq uint32, eventID uint64, viewerID string) []byte {
+		t.Helper()
+		payload, err := protocol.EncodeInput(protocol.InputEnvelope{
+			EventType:   protocol.InputEventMouseMove,
+			EventID:     eventID,
+			TimestampNs: uint64(time.Now().UnixNano()),
+			ViewerID:    viewerID,
+			Mouse: &protocol.MousePayload{
+				XNorm:       0.5,
+				YNorm:       0.5,
+				Button:      protocol.MouseButtonNone,
+				ButtonsMask: 0,
+			},
+		})
+		if err != nil {
+			t.Fatalf("encode input payload: %v", err)
+		}
+
+		return buildPacket(t, protocol.PacketTypeInput, seq, payload)
+	}
+
+	// Unauthorized viewer input should be rejected consistently.
+	for i := 0; i < 2; i++ {
+		if err := unauthorizedViewer.WriteMessage(websocket.BinaryMessage, buildInput(uint32(10+i), uint64(10+i), "viewer-2")); err != nil {
+			t.Fatalf("write unauthorized input %d: %v", i+1, err)
+		}
+
+		hdr, payload, err := readPacket(unauthorizedViewer, 2*time.Second)
+		if err != nil {
+			t.Fatalf("read unauthorized response %d: %v", i+1, err)
+		}
+		if hdr.PacketType != protocol.PacketTypeError {
+			t.Fatalf("unauthorized response packet type %d: got %d want %d", i+1, hdr.PacketType, protocol.PacketTypeError)
+		}
+		ep, err := protocol.DecodeError(payload)
+		if err != nil {
+			t.Fatalf("decode unauthorized ERROR payload %d: %v", i+1, err)
+		}
+		if ep.Reason != "control_permission_denied" {
+			t.Fatalf("unauthorized response reason %d: got %q want %q", i+1, ep.Reason, "control_permission_denied")
+		}
+	}
+
+	// Authorized viewer input should reach agent.
+	if err := controlViewer.WriteMessage(websocket.BinaryMessage, buildInput(100, 100, "viewer-1")); err != nil {
+		t.Fatalf("write authorized input: %v", err)
+	}
+
+	hdr, payload, err := readPacket(agent, 2*time.Second)
+	if err != nil {
+		t.Fatalf("agent read authorized input: %v", err)
+	}
+	if hdr.PacketType != protocol.PacketTypeInput {
+		t.Fatalf("agent packet type for authorized input: got %d want %d", hdr.PacketType, protocol.PacketTypeInput)
+	}
+	inputEnvelope, err := protocol.DecodeInput(payload)
+	if err != nil {
+		t.Fatalf("decode authorized forwarded input: %v", err)
+	}
+	if inputEnvelope.ViewerID != "viewer-1" {
+		t.Fatalf("forwarded authorized input viewerId: got %q want %q", inputEnvelope.ViewerID, "viewer-1")
+	}
+
+	// Flood from authorized viewer should be bounded by rate limiting and not break frame routing.
+	for i := 0; i < 3; i++ {
+		if err := controlViewer.WriteMessage(websocket.BinaryMessage, buildInput(uint32(200+i), uint64(200+i), "viewer-1")); err != nil {
+			t.Fatalf("write flood input %d: %v", i+1, err)
+		}
+	}
+
+	rateLimited := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		hdr, payload, err := readPacket(controlViewer, 250*time.Millisecond)
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			t.Fatalf("read control viewer response during flood: %v", err)
+		}
+		if hdr.PacketType != protocol.PacketTypeError {
+			continue
+		}
+		ep, err := protocol.DecodeError(payload)
+		if err != nil {
+			t.Fatalf("decode control viewer ERROR payload: %v", err)
+		}
+		if ep.Reason == "input_rate_limited" {
+			rateLimited++
+		}
+		if rateLimited > 0 {
+			break
+		}
+	}
+	if rateLimited == 0 {
+		t.Fatalf("expected at least one input_rate_limited response during flood")
+	}
+
+	// Frame routing remains healthy while input load is active.
+	const frameBurst = 20
+	for i := 0; i < frameBurst; i++ {
+		frame := buildPacket(t, protocol.PacketTypeFrame, uint32(300+i), []byte{0xFA, byte(i), 0xCE})
+		if err := agent.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+			t.Fatalf("write frame burst %d: %v", i+1, err)
+		}
+	}
+
+	framesSeen := 0
+	deadline = time.Now().Add(3 * time.Second)
+	for framesSeen < 10 && time.Now().Before(deadline) {
+		hdr, _, err := readPacket(unauthorizedViewer, 250*time.Millisecond)
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			t.Fatalf("read unauthorized viewer packet during frame burst: %v", err)
+		}
+		if hdr.PacketType == protocol.PacketTypeFrame {
+			framesSeen++
+		}
+	}
+	if framesSeen < 10 {
+		t.Fatalf("expected frame routing to remain healthy under input load, got only %d frames", framesSeen)
 	}
 }

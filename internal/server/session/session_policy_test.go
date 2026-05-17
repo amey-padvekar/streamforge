@@ -105,6 +105,71 @@ func TestViewerDisconnectRemovesOnlyThatViewer(t *testing.T) {
 	if got := s.State(); got != SessionStateDegraded {
 		t.Fatalf("state after removing one viewer: got %q want %q", got, SessionStateDegraded)
 	}
+
+	if _, ok := s.ViewerControlMetadata("viewer-1"); ok {
+		t.Fatalf("removed viewer should not keep control metadata")
+	}
+}
+
+func TestViewerControlMetadataDefaultsToViewOnly(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	if ok := s.AddViewer("viewer-1", &websocket.Conn{}, make(chan []byte, 1)); !ok {
+		t.Fatalf("add viewer: expected success")
+	}
+
+	metadata, ok := s.ViewerControlMetadata("viewer-1")
+	if !ok {
+		t.Fatalf("viewer control metadata should exist")
+	}
+	if metadata.Role != ViewerRoleViewOnly {
+		t.Fatalf("viewer role: got %q want %q", metadata.Role, ViewerRoleViewOnly)
+	}
+	if metadata.ControlEnabled {
+		t.Fatalf("new viewer should start with control disabled")
+	}
+	if metadata.GrantedBy != "" {
+		t.Fatalf("default grantedBy: got %q want empty", metadata.GrantedBy)
+	}
+	if !metadata.GrantedAt.IsZero() {
+		t.Fatalf("default grantedAt should be zero")
+	}
+}
+
+func TestSetViewerControlRoleUpdatesGrantMetadata(t *testing.T) {
+	r := NewRegistry()
+	s := r.Create()
+
+	if ok := s.AddViewer("viewer-1", &websocket.Conn{}, make(chan []byte, 1)); !ok {
+		t.Fatalf("add viewer: expected success")
+	}
+
+	grantedAt := time.Now().UTC().Round(0)
+	if ok := s.SetViewerControlRole("viewer-1", ViewerRoleControlEnabled, "owner-1", grantedAt); !ok {
+		t.Fatalf("set viewer control role: expected success")
+	}
+
+	metadata, ok := s.ViewerControlMetadata("viewer-1")
+	if !ok {
+		t.Fatalf("viewer control metadata should exist")
+	}
+	if metadata.Role != ViewerRoleControlEnabled {
+		t.Fatalf("viewer role: got %q want %q", metadata.Role, ViewerRoleControlEnabled)
+	}
+	if !metadata.ControlEnabled {
+		t.Fatalf("control-enabled role should set controlEnabled=true")
+	}
+	if metadata.GrantedBy != "owner-1" {
+		t.Fatalf("grantedBy: got %q want %q", metadata.GrantedBy, "owner-1")
+	}
+	if !metadata.GrantedAt.Equal(grantedAt) {
+		t.Fatalf("grantedAt: got %s want %s", metadata.GrantedAt, grantedAt)
+	}
+
+	if ok := s.SetViewerControlRole("missing", ViewerRoleOwner, "owner-1", grantedAt); ok {
+		t.Fatalf("set control role for missing viewer should fail")
+	}
 }
 
 func TestCleanupIdleSessionsDeletesExpiredIdleSession(t *testing.T) {
@@ -169,6 +234,18 @@ func TestExpireAndCloseClearsResidualViewerResources(t *testing.T) {
 	}
 	if len(s.viewerLastSeen) != 0 {
 		t.Fatalf("viewer last-seen map should be cleared: got %d", len(s.viewerLastSeen))
+	}
+	if len(s.viewerRoles) != 0 {
+		t.Fatalf("viewer roles should be cleared: got %d", len(s.viewerRoles))
+	}
+	if len(s.viewerControl) != 0 {
+		t.Fatalf("viewer control map should be cleared: got %d", len(s.viewerControl))
+	}
+	if len(s.viewerGrantedBy) != 0 {
+		t.Fatalf("viewer grantedBy map should be cleared: got %d", len(s.viewerGrantedBy))
+	}
+	if len(s.viewerGrantedAt) != 0 {
+		t.Fatalf("viewer grantedAt map should be cleared: got %d", len(s.viewerGrantedAt))
 	}
 
 	_, ok := <-outbound

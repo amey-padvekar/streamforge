@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"streamforge/internal/protocol"
+	"streamforge/internal/server/auth"
 	"streamforge/internal/server/session"
 )
 
@@ -276,6 +277,484 @@ func TestHandleSessionWS_EchoesViewerHeartbeat(t *testing.T) {
 	}
 }
 
+func TestHandleSessionWS_ForwardsAuthorizedViewerInput(t *testing.T) {
+	registry := session.NewRegistry()
+	s := registry.Create()
+	h := NewWSHandler(registry)
+
+	if ok := s.TryAttachAgent(&websocket.Conn{}); !ok {
+		t.Fatalf("attach agent: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateConnecting, "agent websocket accepted"); !ok {
+		t.Fatalf("set agent connecting state: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateAuthenticated, "agent auth complete"); !ok {
+		t.Fatalf("set agent authenticated state: expected success")
+	}
+
+	routed := make(chan []byte, 1)
+	h.ViewerInputRouter = func(_ *session.Session, packet []byte) error {
+		routed <- append([]byte(nil), packet...)
+		return nil
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleSessionWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/session/" + s.ID
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	if err := performHandshake(t, conn, "viewer", s.ViewerToken); err != nil {
+		t.Fatalf("viewer handshake failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.HasViewer("viewer-1") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !s.HasViewer("viewer-1") {
+		t.Fatalf("viewer-1 should be attached")
+	}
+
+	if ok := s.SetViewerControlRole("viewer-1", session.ViewerRoleControlEnabled, "owner-1", time.Now()); !ok {
+		t.Fatalf("set viewer control role: expected success")
+	}
+
+	inputPayload, err := protocol.EncodeInput(protocol.InputEnvelope{
+		EventType:   protocol.InputEventMouseMove,
+		EventID:     1,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		ViewerID:    "viewer-1",
+		Mouse: &protocol.MousePayload{
+			XNorm:       0.5,
+			YNorm:       0.5,
+			Button:      protocol.MouseButtonNone,
+			ButtonsMask: 0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode input payload: %v", err)
+	}
+
+	inputHeader := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeInput,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  77,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  uint32(len(inputPayload)),
+	}
+	inputPacket, err := protocol.BuildPacket(inputHeader, inputPayload)
+	if err != nil {
+		t.Fatalf("build input packet: %v", err)
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, inputPacket); err != nil {
+		t.Fatalf("write input packet: %v", err)
+	}
+
+	select {
+	case got := <-routed:
+		if len(got) == 0 {
+			t.Fatalf("routed packet should not be empty")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected authorized input to be routed")
+	}
+}
+
+func TestHandleSessionWS_RejectsUnauthorizedViewerInput(t *testing.T) {
+	registry := session.NewRegistry()
+	s := registry.Create()
+	h := NewWSHandler(registry)
+
+	if ok := s.TryAttachAgent(&websocket.Conn{}); !ok {
+		t.Fatalf("attach agent: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateConnecting, "agent websocket accepted"); !ok {
+		t.Fatalf("set agent connecting state: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateAuthenticated, "agent auth complete"); !ok {
+		t.Fatalf("set agent authenticated state: expected success")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleSessionWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/session/" + s.ID
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	if err := performHandshake(t, conn, "viewer", s.ViewerToken); err != nil {
+		t.Fatalf("viewer handshake failed: %v", err)
+	}
+
+	inputPayload, err := protocol.EncodeInput(protocol.InputEnvelope{
+		EventType:   protocol.InputEventMouseMove,
+		EventID:     1,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		ViewerID:    "viewer-1",
+		Mouse: &protocol.MousePayload{
+			XNorm:       0.5,
+			YNorm:       0.5,
+			Button:      protocol.MouseButtonNone,
+			ButtonsMask: 0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode input payload: %v", err)
+	}
+
+	inputHeader := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeInput,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  88,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  uint32(len(inputPayload)),
+	}
+	inputPacket, err := protocol.BuildPacket(inputHeader, inputPayload)
+	if err != nil {
+		t.Fatalf("build input packet: %v", err)
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, inputPacket); err != nil {
+		t.Fatalf("write input packet: %v", err)
+	}
+
+	reason, detail := readErrorPacket(t, conn)
+	if reason != "control_permission_denied" {
+		t.Fatalf("unexpected error reason: got %q want %q", reason, "control_permission_denied")
+	}
+	if !strings.Contains(detail, "not allowed") {
+		t.Fatalf("unexpected error detail: %q", detail)
+	}
+}
+
+func TestHandleSessionWS_RejectsMalformedViewerInputPayload(t *testing.T) {
+	registry := session.NewRegistry()
+	s := registry.Create()
+	h := NewWSHandler(registry)
+
+	if ok := s.TryAttachAgent(&websocket.Conn{}); !ok {
+		t.Fatalf("attach agent: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateConnecting, "agent websocket accepted"); !ok {
+		t.Fatalf("set agent connecting state: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateAuthenticated, "agent auth complete"); !ok {
+		t.Fatalf("set agent authenticated state: expected success")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleSessionWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/session/" + s.ID
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	if err := performHandshake(t, conn, "viewer", s.ViewerToken); err != nil {
+		t.Fatalf("viewer handshake failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.HasViewer("viewer-1") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !s.HasViewer("viewer-1") {
+		t.Fatalf("viewer-1 should be attached")
+	}
+
+	if ok := s.SetViewerControlRole("viewer-1", session.ViewerRoleControlEnabled, "owner-1", time.Now()); !ok {
+		t.Fatalf("set viewer control role: expected success")
+	}
+
+	badPayload := []byte("{not-json")
+	inputHeader := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeInput,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  99,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  uint32(len(badPayload)),
+	}
+	inputPacket, err := protocol.BuildPacket(inputHeader, badPayload)
+	if err != nil {
+		t.Fatalf("build input packet: %v", err)
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, inputPacket); err != nil {
+		t.Fatalf("write input packet: %v", err)
+	}
+
+	reason, _ := readErrorPacket(t, conn)
+	if reason != "invalid_input_payload" {
+		t.Fatalf("unexpected error reason: got %q want %q", reason, "invalid_input_payload")
+	}
+}
+
+func TestHandleSessionWS_ForwardsViewerInputToActiveAgent(t *testing.T) {
+	registry := session.NewRegistry()
+	s := registry.Create()
+	h := NewWSHandler(registry)
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleSessionWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/session/" + s.ID
+	agentConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial agent websocket: %v", err)
+	}
+	defer agentConn.Close()
+
+	if err := performHandshake(t, agentConn, "agent", s.AgentToken); err != nil {
+		t.Fatalf("agent handshake failed: %v", err)
+	}
+
+	viewerConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial viewer websocket: %v", err)
+	}
+	defer viewerConn.Close()
+
+	if err := performHandshake(t, viewerConn, "viewer", s.ViewerToken); err != nil {
+		t.Fatalf("viewer handshake failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.HasViewer("viewer-1") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !s.HasViewer("viewer-1") {
+		t.Fatalf("viewer-1 should be attached")
+	}
+
+	if ok := s.SetViewerControlRole("viewer-1", session.ViewerRoleControlEnabled, "owner-1", time.Now()); !ok {
+		t.Fatalf("set viewer control role: expected success")
+	}
+
+	inputPayload, err := protocol.EncodeInput(protocol.InputEnvelope{
+		EventType:   protocol.InputEventMouseMove,
+		EventID:     1,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		ViewerID:    "viewer-1",
+		Mouse: &protocol.MousePayload{
+			XNorm:       0.5,
+			YNorm:       0.5,
+			Button:      protocol.MouseButtonNone,
+			ButtonsMask: 0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode input payload: %v", err)
+	}
+
+	inputHeader := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeInput,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  123,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  uint32(len(inputPayload)),
+	}
+	inputPacket, err := protocol.BuildPacket(inputHeader, inputPayload)
+	if err != nil {
+		t.Fatalf("build input packet: %v", err)
+	}
+
+	if err := viewerConn.WriteMessage(websocket.BinaryMessage, inputPacket); err != nil {
+		t.Fatalf("write viewer input packet: %v", err)
+	}
+
+	gotHeader, gotPayload, err := readPacket(t, agentConn, protocol.PacketTypeInput)
+	if err != nil {
+		t.Fatalf("read forwarded input packet at agent: %v", err)
+	}
+	if gotHeader.SequenceID != inputHeader.SequenceID {
+		t.Fatalf("forwarded input sequence mismatch: got %d want %d", gotHeader.SequenceID, inputHeader.SequenceID)
+	}
+
+	gotEnvelope, err := protocol.DecodeInput(gotPayload)
+	if err != nil {
+		t.Fatalf("decode forwarded input payload: %v", err)
+	}
+	if gotEnvelope.ViewerID != "viewer-1" {
+		t.Fatalf("forwarded input viewerId: got %q want %q", gotEnvelope.ViewerID, "viewer-1")
+	}
+}
+
+func TestHandleSessionWS_DropsRateLimitedInputWithoutDisconnect(t *testing.T) {
+	restore := auth.SetInputRateLimitsForTesting(1, 1)
+	defer restore()
+
+	registry := session.NewRegistry()
+	s := registry.Create()
+	h := NewWSHandler(registry)
+	h.ViewerInputRouter = func(_ *session.Session, _ []byte) error { return nil }
+
+	if ok := s.TryAttachAgent(&websocket.Conn{}); !ok {
+		t.Fatalf("attach agent: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateConnecting, "agent websocket accepted"); !ok {
+		t.Fatalf("set agent connecting state: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateAuthenticated, "agent auth complete"); !ok {
+		t.Fatalf("set agent authenticated state: expected success")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleSessionWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/session/" + s.ID
+	viewerConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial viewer websocket: %v", err)
+	}
+	defer viewerConn.Close()
+
+	if err := performHandshake(t, viewerConn, "viewer", s.ViewerToken); err != nil {
+		t.Fatalf("viewer handshake failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.HasViewer("viewer-1") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !s.HasViewer("viewer-1") {
+		t.Fatalf("viewer-1 should be attached")
+	}
+
+	if ok := s.SetViewerControlRole("viewer-1", session.ViewerRoleControlEnabled, "owner-1", time.Now()); !ok {
+		t.Fatalf("set viewer control role: expected success")
+	}
+
+	allowedPacket := mustBuildInputPacket(t, 1, 101, "viewer-1")
+	if err := viewerConn.WriteMessage(websocket.BinaryMessage, allowedPacket); err != nil {
+		t.Fatalf("write first input packet: %v", err)
+	}
+
+	rateLimitedPacket := mustBuildInputPacket(t, 2, 102, "viewer-1")
+	if err := viewerConn.WriteMessage(websocket.BinaryMessage, rateLimitedPacket); err != nil {
+		t.Fatalf("write rate-limited input packet: %v", err)
+	}
+
+	reason, _ := readErrorPacket(t, viewerConn)
+	if reason != "input_rate_limited" {
+		t.Fatalf("unexpected rate-limit reason: got %q want %q", reason, "input_rate_limited")
+	}
+
+	heartbeatHeader := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeHeartbeat,
+		SequenceID:  500,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  0,
+	}
+	heartbeatPacket, err := protocol.BuildPacket(heartbeatHeader, nil)
+	if err != nil {
+		t.Fatalf("build heartbeat packet: %v", err)
+	}
+
+	if err := viewerConn.WriteMessage(websocket.BinaryMessage, heartbeatPacket); err != nil {
+		t.Fatalf("write heartbeat packet after rate-limit: %v", err)
+	}
+
+	if _, _, err := readPacket(t, viewerConn, protocol.PacketTypeHeartbeat); err != nil {
+		t.Fatalf("viewer should stay connected after rate-limit drop: %v", err)
+	}
+}
+
+func TestHandleSessionWS_DemotesViewerAfterRepeatedRateLimitAbuse(t *testing.T) {
+	restore := auth.SetInputRateLimitsForTesting(1, 1)
+	defer restore()
+
+	registry := session.NewRegistry()
+	s := registry.Create()
+	h := NewWSHandler(registry)
+	h.ViewerInputRouter = func(_ *session.Session, _ []byte) error { return nil }
+
+	if ok := s.TryAttachAgent(&websocket.Conn{}); !ok {
+		t.Fatalf("attach agent: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateConnecting, "agent websocket accepted"); !ok {
+		t.Fatalf("set agent connecting state: expected success")
+	}
+	if ok := s.SetAgentConnectionState(session.ConnectionStateAuthenticated, "agent auth complete"); !ok {
+		t.Fatalf("set agent authenticated state: expected success")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleSessionWS))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/session/" + s.ID
+	viewerConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial viewer websocket: %v", err)
+	}
+	defer viewerConn.Close()
+
+	if err := performHandshake(t, viewerConn, "viewer", s.ViewerToken); err != nil {
+		t.Fatalf("viewer handshake failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.HasViewer("viewer-1") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !s.HasViewer("viewer-1") {
+		t.Fatalf("viewer-1 should be attached")
+	}
+
+	if ok := s.SetViewerControlRole("viewer-1", session.ViewerRoleControlEnabled, "owner-1", time.Now()); !ok {
+		t.Fatalf("set viewer control role: expected success")
+	}
+
+	firstAllowed := mustBuildInputPacket(t, 1, 201, "viewer-1")
+	if err := viewerConn.WriteMessage(websocket.BinaryMessage, firstAllowed); err != nil {
+		t.Fatalf("write first input packet: %v", err)
+	}
+
+	for i := 0; i < viewerAbuseDemotionThreshold; i++ {
+		packet := mustBuildInputPacket(t, uint64(i+2), uint32(202+i), "viewer-1")
+		if err := viewerConn.WriteMessage(websocket.BinaryMessage, packet); err != nil {
+			t.Fatalf("write abusive input packet %d: %v", i+1, err)
+		}
+
+		reason, _ := readErrorPacket(t, viewerConn)
+		if i < viewerAbuseDemotionThreshold-1 && reason != "input_rate_limited" {
+			t.Fatalf("abuse strike %d reason: got %q want %q", i+1, reason, "input_rate_limited")
+		}
+		if i == viewerAbuseDemotionThreshold-1 && reason != "control_revoked_abuse" {
+			t.Fatalf("final abuse reason: got %q want %q", reason, "control_revoked_abuse")
+		}
+	}
+
+	postDemotionPacket := mustBuildInputPacket(t, 100, 999, "viewer-1")
+	if err := viewerConn.WriteMessage(websocket.BinaryMessage, postDemotionPacket); err != nil {
+		t.Fatalf("write post-demotion input packet: %v", err)
+	}
+
+	reason, _ := readErrorPacket(t, viewerConn)
+	if reason != "control_permission_denied" {
+		t.Fatalf("post-demotion reason: got %q want %q", reason, "control_permission_denied")
+	}
+}
+
 func TestHandleSessionWS_DisconnectsStaleAgentAndAllowsReconnect(t *testing.T) {
 	previous := StaleThreshold
 	StaleThreshold = 200 * time.Millisecond
@@ -444,6 +923,43 @@ func readPacket(t *testing.T, conn *websocket.Conn, packetType protocol.PacketTy
 	}
 
 	return h, payload, nil
+}
+
+func mustBuildInputPacket(t *testing.T, eventID uint64, sequenceID uint32, viewerID string) []byte {
+	t.Helper()
+
+	payload, err := protocol.EncodeInput(protocol.InputEnvelope{
+		EventType:   protocol.InputEventMouseMove,
+		EventID:     eventID,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		ViewerID:    viewerID,
+		Mouse: &protocol.MousePayload{
+			XNorm:       0.5,
+			YNorm:       0.5,
+			Button:      protocol.MouseButtonNone,
+			ButtonsMask: 0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode input payload: %v", err)
+	}
+
+	header := protocol.Header{
+		Version:     protocol.ProtocolVersion,
+		PacketType:  protocol.PacketTypeInput,
+		Flags:       0,
+		Reserved:    0,
+		SequenceID:  sequenceID,
+		TimestampNs: uint64(time.Now().UnixNano()),
+		PayloadLen:  uint32(len(payload)),
+	}
+
+	packet, err := protocol.BuildPacket(header, payload)
+	if err != nil {
+		t.Fatalf("build input packet: %v", err)
+	}
+
+	return packet
 }
 
 type unexpectedPacketTypeError struct {

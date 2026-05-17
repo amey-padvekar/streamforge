@@ -15,6 +15,10 @@ func TestPrometheusHandler_ScrapeExposesMetricFamilies(t *testing.T) {
 	IncFramesReceived("session-test", 1)
 	IncFramesForwarded("session-test", 1)
 	IncFramesDropped("session-test", "viewer_queue_full", 1)
+	IncInputReceived("session-test", "viewer-1", "16", 1)
+	IncInputForwarded("session-test", "16", 1)
+	IncInputDropped("session-test", "input_rate_limited", 1)
+	IncControlPermissionDenied("session-test", "control_permission_denied", 1)
 	SetViewersConnected("session-test", 1)
 	SetSessionFPS("session-test", 12.5)
 	IncTransportErrors("server", ErrorCategoryProtocol)
@@ -33,6 +37,10 @@ func TestPrometheusHandler_ScrapeExposesMetricFamilies(t *testing.T) {
 		"streamforge_frames_received_total",
 		"streamforge_frames_forwarded_total",
 		"streamforge_frames_dropped_total",
+		"streamforge_input_received_total",
+		"streamforge_input_forwarded_total",
+		"streamforge_input_dropped_total",
+		"streamforge_control_permission_denied_total",
 		"streamforge_viewers_connected",
 		"streamforge_session_fps",
 		"streamforge_transport_errors_total",

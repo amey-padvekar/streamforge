@@ -33,6 +33,7 @@ type WSHandler struct {
 	AgentHandler     func(*session.Session, *websocket.Conn)
 	ViewerHandler    func(*session.Session, *websocket.Conn)
 	AgentFrameRouter func(*session.Session, []byte) error
+	ViewerInputRouter func(*session.Session, []byte) error
 
 	viewerSeq atomic.Uint64
 }
@@ -52,6 +53,7 @@ func NewWSHandler(registry *session.Registry) *WSHandler {
 	h.AgentHandler = h.handleAgentConnection
 	h.ViewerHandler = h.handleViewerConnection
 	h.AgentFrameRouter = h.routeAgentFrame
+	h.ViewerInputRouter = h.routeViewerInput
 
 	return h
 }
@@ -290,6 +292,10 @@ func defaultAgentFrameRouter(_ *session.Session, _ []byte) error {
 	return nil
 }
 
+func defaultViewerInputRouter(_ *session.Session, _ []byte) error {
+	return nil
+}
+
 func (h *WSHandler) routeAgentFrame(s *session.Session, frame []byte) error {
 	forwarded, dropped := router.FanoutFrame(s, frame)
 	if dropped > 0 {
@@ -298,6 +304,10 @@ func (h *WSHandler) routeAgentFrame(s *session.Session, frame []byte) error {
 	}
 
 	return nil
+}
+
+func (h *WSHandler) routeViewerInput(s *session.Session, packet []byte) error {
+	return router.RouteInput(s, packet)
 }
 
 func (h *WSHandler) nextViewerID() string {
