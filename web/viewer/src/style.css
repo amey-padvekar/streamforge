@@ -52,3 +52,51 @@ h1 {
   line-height: 1.7;
   color: #cbd5e1;
 }
+
+.control-panel {
+  margin-top: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.control-toggle {
+  border: 1px solid rgba(125, 211, 252, 0.5);
+  border-radius: 999px;
+  padding: 0.45rem 0.85rem;
+  color: #dbeafe;
+  background: rgba(14, 116, 144, 0.3);
+  cursor: pointer;
+}
+
+.control-toggle:hover {
+  background: rgba(14, 116, 144, 0.45);
+}
+
+.control-state-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+
+.control-state-badge[data-mode="view-only"] {
+  color: #cbd5e1;
+  background: rgba(71, 85, 105, 0.35);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+.control-state-badge[data-mode="control-await-focus"] {
+  color: #fde68a;
+  background: rgba(146, 64, 14, 0.32);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.control-state-badge[data-mode="control-focused"] {
+  color: #bbf7d0;
+  background: rgba(22, 101, 52, 0.32);
+  border-color: rgba(34, 197, 94, 0.35);
+}

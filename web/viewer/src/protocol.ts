@@ -76,11 +76,19 @@ export interface MousePayload {
   yNorm: number;
   button: number;
   buttonsMask: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  frameWidth?: number;
+  frameHeight?: number;
 }
 
 export interface WheelPayload {
   deltaX: number;
   deltaY: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  frameWidth?: number;
+  frameHeight?: number;
 }
 
 export interface KeyPayload {
@@ -404,11 +412,37 @@ function validateMousePayload(mouse: MousePayload): void {
   if ((mouse.buttonsMask & ~allowedMask) !== 0) {
     throw new Error(`invalid mouse buttons mask: ${mouse.buttonsMask}`);
   }
+
+  if (mouse.viewportWidth !== undefined && (!Number.isFinite(mouse.viewportWidth) || mouse.viewportWidth <= 0)) {
+    throw new Error("viewportWidth must be > 0 when provided");
+  }
+  if (mouse.viewportHeight !== undefined && (!Number.isFinite(mouse.viewportHeight) || mouse.viewportHeight <= 0)) {
+    throw new Error("viewportHeight must be > 0 when provided");
+  }
+  if (mouse.frameWidth !== undefined && (!Number.isFinite(mouse.frameWidth) || mouse.frameWidth <= 0)) {
+    throw new Error("frameWidth must be > 0 when provided");
+  }
+  if (mouse.frameHeight !== undefined && (!Number.isFinite(mouse.frameHeight) || mouse.frameHeight <= 0)) {
+    throw new Error("frameHeight must be > 0 when provided");
+  }
 }
 
 function validateWheelPayload(wheel: WheelPayload): void {
   if (!Number.isFinite(wheel.deltaX) || !Number.isFinite(wheel.deltaY)) {
     throw new Error("deltaX and deltaY must be finite numbers");
+  }
+
+  if (wheel.viewportWidth !== undefined && (!Number.isFinite(wheel.viewportWidth) || wheel.viewportWidth <= 0)) {
+    throw new Error("viewportWidth must be > 0 when provided");
+  }
+  if (wheel.viewportHeight !== undefined && (!Number.isFinite(wheel.viewportHeight) || wheel.viewportHeight <= 0)) {
+    throw new Error("viewportHeight must be > 0 when provided");
+  }
+  if (wheel.frameWidth !== undefined && (!Number.isFinite(wheel.frameWidth) || wheel.frameWidth <= 0)) {
+    throw new Error("frameWidth must be > 0 when provided");
+  }
+  if (wheel.frameHeight !== undefined && (!Number.isFinite(wheel.frameHeight) || wheel.frameHeight <= 0)) {
+    throw new Error("frameHeight must be > 0 when provided");
   }
 }
 

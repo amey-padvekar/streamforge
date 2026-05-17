@@ -43,6 +43,11 @@ export interface RendererLatencySnapshot {
   decodeRenderMs: HistogramSnapshot;
 }
 
+export interface RendererFrameSize {
+  width: number;
+  height: number;
+}
+
 export class Renderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
@@ -138,6 +143,17 @@ export class Renderer {
     }
 
     return `${this.lastFrameWidth} x ${this.lastFrameHeight}`;
+  }
+
+  getLastFrameSize(): RendererFrameSize | null {
+    if (this.lastFrameWidth <= 0 || this.lastFrameHeight <= 0) {
+      return null;
+    }
+
+    return {
+      width: this.lastFrameWidth,
+      height: this.lastFrameHeight,
+    };
   }
 
   getLatencySnapshot(): RendererLatencySnapshot {

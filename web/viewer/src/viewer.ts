@@ -1,9 +1,11 @@
 import {
+  type InputEnvelope,
   extractJpegPayload,
   parseFrameHeader,
   encodeHello,
   encodeAuth,
   encodeHeartbeat,
+  encodeInput,
   decodeErrorPayload,
   PACKET_TYPE_ACK,
   PACKET_TYPE_ERROR,
@@ -16,6 +18,7 @@ const BASE_RECONNECT_DELAY_MS = 500;
 const MAX_RECONNECT_DELAY_MS = 8000;
 const HEARTBEAT_INTERVAL_MS = 5000;
 const HEARTBEAT_TIMEOUT_MS = 15000;
+const MAX_INPUT_QUEUE_SIZE = 64;
 
 const VALID_TRANSITIONS: Record<ViewerConnectionState, ViewerConnectionState[]> = {
   disconnected: ["connecting"],
@@ -52,6 +55,8 @@ export class Viewer {
   private heartbeatSeq = 0;
   private heartbeatIntervalTimer: number | null = null;
   private heartbeatTimeoutTimer: number | null = null;
+  private inputSequence = 0;
+  private inputQueue: InputEnvelope[] = [];
   private shouldReconnect = true;
   private stateChangeHandler?: (state: ViewerConnectionState) => void;
   private state: ViewerConnectionState = "disconnected";
@@ -85,10 +90,21 @@ export class Viewer {
     this.openSocket(this.reconnectAttempt > 0);
   }
 
+  enqueueInput(input: InputEnvelope): void {
+    if (!this.ready || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      this.bufferInput(input, "not-ready");
+      return;
+    }
+
+    this.bufferInput(input, "burst-buffer");
+    this.flushInputQueue();
+  }
+
   disconnect(): void {
     this.shouldReconnect = false;
     this.clearReconnectTimer();
     this.clearHeartbeatTimers();
+    this.dropAllQueuedInput("disconnect");
 
     if (this.socket) {
       this.socket.close();
@@ -98,6 +114,7 @@ export class Viewer {
     this.reconnectAttempt = 0;
     this.authed = false;
     this.ready = false;
+    this.inputSequence = 0;
     this.setState("disconnected");
   }
 
@@ -117,6 +134,7 @@ export class Viewer {
 
     this.authed = false;
     this.ready = false;
+    this.dropAllQueuedInput(isReconnect ? "reconnect" : "new-connection");
     this.setState("connecting");
 
     const socket = new WebSocket(this.buildSessionUrl());
@@ -223,6 +241,7 @@ export class Viewer {
         this.setState("authenticated");
         this.ready = true;
         this.startHeartbeatLoop();
+        this.flushInputQueue();
         return;
       } else if (packetType === PACKET_TYPE_ERROR) {
         const payload = new Uint8Array(buffer, PROTOCOL_HEADER_SIZE);
@@ -358,6 +377,85 @@ export class Viewer {
       window.clearTimeout(this.heartbeatTimeoutTimer);
       this.heartbeatTimeoutTimer = null;
     }
+  }
+
+  private bufferInput(input: InputEnvelope, reason: string): void {
+    if (this.inputQueue.length >= MAX_INPUT_QUEUE_SIZE) {
+      const dropped = this.inputQueue.shift();
+      console.warn("viewer input dropped", this.logFields({
+        packetType: "input",
+        errorCategory: "backpressure",
+        reason: "queue-overflow",
+        droppedEventId: dropped?.eventId,
+        droppedEventType: dropped?.eventType,
+        queueDepth: this.inputQueue.length,
+      }));
+    }
+
+    this.inputQueue.push(input);
+    console.debug("viewer input queued", this.logFields({
+      packetType: "input",
+      errorCategory: "internal",
+      reason,
+      eventId: input.eventId,
+      eventType: input.eventType,
+      queueDepth: this.inputQueue.length,
+    }));
+  }
+
+  private flushInputQueue(): void {
+    if (!this.ready || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    while (this.inputQueue.length > 0) {
+      const input = this.inputQueue[0];
+      this.inputSequence += 1;
+
+      try {
+        const packet = encodeInput(input, this.inputSequence);
+        this.socket.send(packet.buffer as ArrayBuffer);
+        this.inputQueue.shift();
+
+        console.info("viewer input sent", this.logFields({
+          packetType: "input",
+          errorCategory: "internal",
+          eventId: input.eventId,
+          eventType: input.eventType,
+          sequenceId: this.inputSequence,
+          queueDepth: this.inputQueue.length,
+        }));
+      } catch (error) {
+        this.inputSequence -= 1;
+        console.error("viewer input send failed", this.logFields({
+          packetType: "input",
+          errorCategory: "transport",
+          reason: "send-failed",
+          eventId: input.eventId,
+          eventType: input.eventType,
+          sequenceId: this.inputSequence + 1,
+          queueDepth: this.inputQueue.length,
+          error,
+        }));
+        break;
+      }
+    }
+  }
+
+  private dropAllQueuedInput(reason: string): void {
+    if (this.inputQueue.length === 0) {
+      return;
+    }
+
+    const droppedCount = this.inputQueue.length;
+    this.inputQueue = [];
+    console.warn("viewer input dropped", this.logFields({
+      packetType: "input",
+      errorCategory: "backpressure",
+      reason,
+      droppedCount,
+      queueDepth: 0,
+    }));
   }
 
   private setState(state: ViewerConnectionState): void {
