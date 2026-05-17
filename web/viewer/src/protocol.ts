@@ -13,7 +13,34 @@ export const PACKET_TYPE_AUTH = 0x02;
 export const PACKET_TYPE_FRAME = 0x03;
 export const PACKET_TYPE_HEARTBEAT = 0x04;
 export const PACKET_TYPE_ACK = 0x05;
+export const PACKET_TYPE_CONTROL = 0x06;
 export const PACKET_TYPE_ERROR = 0x07;
+export const PACKET_TYPE_INPUT = 0x08;
+
+export const INPUT_EVENT_MOUSE_MOVE = 0x10;
+export const INPUT_EVENT_MOUSE_DOWN = 0x11;
+export const INPUT_EVENT_MOUSE_UP = 0x12;
+export const INPUT_EVENT_MOUSE_WHEEL = 0x13;
+
+export const INPUT_EVENT_KEY_DOWN = 0x20;
+export const INPUT_EVENT_KEY_UP = 0x21;
+
+export const INPUT_EVENT_RESIZE_HINT = 0x30;
+export const INPUT_EVENT_MONITOR_SELECT = 0x31;
+
+export const MOUSE_BUTTON_NONE = 0;
+export const MOUSE_BUTTON_LEFT = 1;
+export const MOUSE_BUTTON_RIGHT = 2;
+export const MOUSE_BUTTON_MIDDLE = 3;
+
+export const MOUSE_BUTTON_MASK_LEFT = 1 << 0;
+export const MOUSE_BUTTON_MASK_RIGHT = 1 << 1;
+export const MOUSE_BUTTON_MASK_MIDDLE = 1 << 2;
+
+export const KEY_MODIFIER_CTRL = 1 << 0;
+export const KEY_MODIFIER_ALT = 1 << 1;
+export const KEY_MODIFIER_SHIFT = 1 << 2;
+export const KEY_MODIFIER_META = 1 << 3;
 
 export const PROTOCOL_VERSION = 1;
 
@@ -43,6 +70,44 @@ export interface Header {
   timestampNs: bigint;
   payloadLen: number;
 }
+
+export interface MousePayload {
+  xNorm: number;
+  yNorm: number;
+  button: number;
+  buttonsMask: number;
+}
+
+export interface WheelPayload {
+  deltaX: number;
+  deltaY: number;
+}
+
+export interface KeyPayload {
+  code: string;
+  key: string;
+  modifiers: number;
+}
+
+export interface DisplayPayload {
+  targetMonitorId: string;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+export interface InputEnvelope {
+  eventType: number;
+  eventId: number;
+  timestampNs: number;
+  viewerId: string;
+  mouse?: MousePayload;
+  wheel?: WheelPayload;
+  key?: KeyPayload;
+  display?: DisplayPayload;
+}
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 export function encodeHeader(h: Header): Uint8Array {
   const buf = new Uint8Array(PROTOCOL_HEADER_SIZE);
@@ -78,7 +143,7 @@ export function decodeHeader(buffer: ArrayBuffer): Header | null {
 }
 
 export function encodeHello(agentId: string, supportedVersion: number, capabilityFlags: number): Uint8Array {
-  const id = new TextEncoder().encode(agentId);
+  const id = textEncoder.encode(agentId);
   if (id.length > 255) {
     throw new Error("agentId too long");
   }
@@ -107,8 +172,8 @@ export function encodeHello(agentId: string, supportedVersion: number, capabilit
 }
 
 export function encodeAuth(role: string, token: string): Uint8Array {
-  const roleBytes = new TextEncoder().encode(role.toLowerCase());
-  const tokenBytes = new TextEncoder().encode(token);
+  const roleBytes = textEncoder.encode(role.toLowerCase());
+  const tokenBytes = textEncoder.encode(token);
 
   if (roleBytes.length > 255) {
     throw new Error("role too long");
@@ -169,7 +234,7 @@ export function decodeErrorPayload(payload: Uint8Array): { reason: string; detai
     return null;
   }
 
-  const reason = new TextDecoder().decode(payload.slice(1, 1 + reasonLen));
+  const reason = textDecoder.decode(payload.slice(1, 1 + reasonLen));
   const detailLenOffset = 1 + reasonLen;
   const detailLen = ((payload[detailLenOffset] << 8) | payload[detailLenOffset + 1]) >>> 0;
 
@@ -177,9 +242,226 @@ export function decodeErrorPayload(payload: Uint8Array): { reason: string; detai
     return null;
   }
 
-  const detail = new TextDecoder().decode(payload.slice(detailLenOffset + 2, detailLenOffset + 2 + detailLen));
+  const detail = textDecoder.decode(payload.slice(detailLenOffset + 2, detailLenOffset + 2 + detailLen));
 
   return { reason, detail };
+}
+
+export function mapPointerButton(button: number): number {
+  switch (button) {
+    case 0:
+      return MOUSE_BUTTON_LEFT;
+    case 1:
+      return MOUSE_BUTTON_MIDDLE;
+    case 2:
+      return MOUSE_BUTTON_RIGHT;
+    default:
+      return MOUSE_BUTTON_NONE;
+  }
+}
+
+export function mapPointerButtonsMask(buttons: number): number {
+  let mask = 0;
+  if ((buttons & 1) !== 0) {
+    mask |= MOUSE_BUTTON_MASK_LEFT;
+  }
+  if ((buttons & 2) !== 0) {
+    mask |= MOUSE_BUTTON_MASK_RIGHT;
+  }
+  if ((buttons & 4) !== 0) {
+    mask |= MOUSE_BUTTON_MASK_MIDDLE;
+  }
+  return mask;
+}
+
+export function mapKeyboardModifiers(event: KeyboardEvent): number {
+  let modifiers = 0;
+  if (event.ctrlKey) {
+    modifiers |= KEY_MODIFIER_CTRL;
+  }
+  if (event.altKey) {
+    modifiers |= KEY_MODIFIER_ALT;
+  }
+  if (event.shiftKey) {
+    modifiers |= KEY_MODIFIER_SHIFT;
+  }
+  if (event.metaKey) {
+    modifiers |= KEY_MODIFIER_META;
+  }
+  return modifiers;
+}
+
+export function encodeInputPayload(input: InputEnvelope): Uint8Array {
+  validateInputEnvelope(input);
+  const payloadText = JSON.stringify(input);
+  const payload = textEncoder.encode(payloadText);
+
+  if (payload.length > 8 * 1024 * 1024) {
+    throw new Error("input payload too large");
+  }
+
+  return payload;
+}
+
+export function decodeInputPayload(payload: Uint8Array): InputEnvelope {
+  const text = textDecoder.decode(payload);
+  const parsed = JSON.parse(text) as InputEnvelope;
+  validateInputEnvelope(parsed);
+  return parsed;
+}
+
+export function encodeInput(input: InputEnvelope, sequenceId: number): Uint8Array {
+  const payload = encodeInputPayload(input);
+
+  const header: Header = {
+    version: PROTOCOL_VERSION,
+    packetType: PACKET_TYPE_INPUT,
+    flags: 0,
+    reserved: 0,
+    sequenceId,
+    timestampNs: BigInt(input.timestampNs),
+    payloadLen: payload.length,
+  };
+
+  const headerBytes = encodeHeader(header);
+  const packet = new Uint8Array(PROTOCOL_HEADER_SIZE + payload.length);
+  packet.set(headerBytes);
+  packet.set(payload, PROTOCOL_HEADER_SIZE);
+  return packet;
+}
+
+function validateInputEnvelope(input: InputEnvelope): void {
+  if (!isKnownInputEventType(input.eventType)) {
+    throw new Error(`unknown input event type: ${input.eventType}`);
+  }
+  if (!Number.isFinite(input.eventId) || input.eventId <= 0) {
+    throw new Error("eventId must be > 0");
+  }
+  if (!Number.isFinite(input.timestampNs) || input.timestampNs <= 0) {
+    throw new Error("timestampNs must be > 0");
+  }
+  if (!input.viewerId || input.viewerId.trim().length === 0) {
+    throw new Error("viewerId must be non-empty");
+  }
+
+  const payloadCount =
+    (input.mouse ? 1 : 0) +
+    (input.wheel ? 1 : 0) +
+    (input.key ? 1 : 0) +
+    (input.display ? 1 : 0);
+  if (payloadCount !== 1) {
+    throw new Error("exactly one payload block must be set");
+  }
+
+  if (isMouseEvent(input.eventType)) {
+    if (!input.mouse) {
+      throw new Error("mouse payload required for mouse event");
+    }
+    validateMousePayload(input.mouse);
+  }
+
+  if (input.eventType === INPUT_EVENT_MOUSE_WHEEL) {
+    if (!input.wheel) {
+      throw new Error("wheel payload required for mouse wheel event");
+    }
+    validateWheelPayload(input.wheel);
+  }
+
+  if (isKeyEvent(input.eventType)) {
+    if (!input.key) {
+      throw new Error("key payload required for key event");
+    }
+    validateKeyPayload(input.key);
+  }
+
+  if (isDisplayEvent(input.eventType)) {
+    if (!input.display) {
+      throw new Error("display payload required for display event");
+    }
+    validateDisplayPayload(input.display);
+  }
+}
+
+function validateMousePayload(mouse: MousePayload): void {
+  if (!Number.isFinite(mouse.xNorm) || !Number.isFinite(mouse.yNorm)) {
+    throw new Error("xNorm and yNorm must be finite numbers");
+  }
+  if (mouse.xNorm < 0 || mouse.xNorm > 1 || mouse.yNorm < 0 || mouse.yNorm > 1) {
+    throw new Error("xNorm and yNorm must be in [0,1]");
+  }
+
+  const knownButtons = new Set<number>([
+    MOUSE_BUTTON_NONE,
+    MOUSE_BUTTON_LEFT,
+    MOUSE_BUTTON_RIGHT,
+    MOUSE_BUTTON_MIDDLE,
+  ]);
+  if (!knownButtons.has(mouse.button)) {
+    throw new Error(`invalid mouse button: ${mouse.button}`);
+  }
+
+  const allowedMask = MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_RIGHT | MOUSE_BUTTON_MASK_MIDDLE;
+  if ((mouse.buttonsMask & ~allowedMask) !== 0) {
+    throw new Error(`invalid mouse buttons mask: ${mouse.buttonsMask}`);
+  }
+}
+
+function validateWheelPayload(wheel: WheelPayload): void {
+  if (!Number.isFinite(wheel.deltaX) || !Number.isFinite(wheel.deltaY)) {
+    throw new Error("deltaX and deltaY must be finite numbers");
+  }
+}
+
+function validateKeyPayload(key: KeyPayload): void {
+  if (key.code.trim().length === 0 && key.key.trim().length === 0) {
+    throw new Error("key payload must include non-empty code or key");
+  }
+
+  const allowedMask = KEY_MODIFIER_CTRL | KEY_MODIFIER_ALT | KEY_MODIFIER_SHIFT | KEY_MODIFIER_META;
+  if ((key.modifiers & ~allowedMask) !== 0) {
+    throw new Error(`invalid key modifiers bitmask: ${key.modifiers}`);
+  }
+}
+
+function validateDisplayPayload(display: DisplayPayload): void {
+  if (!display.targetMonitorId || display.targetMonitorId.trim().length === 0) {
+    throw new Error("targetMonitorId must be non-empty");
+  }
+  if (!Number.isFinite(display.viewportWidth) || display.viewportWidth <= 0) {
+    throw new Error("viewportWidth must be > 0");
+  }
+  if (!Number.isFinite(display.viewportHeight) || display.viewportHeight <= 0) {
+    throw new Error("viewportHeight must be > 0");
+  }
+}
+
+function isKnownInputEventType(eventType: number): boolean {
+  return (
+    eventType === INPUT_EVENT_MOUSE_MOVE ||
+    eventType === INPUT_EVENT_MOUSE_DOWN ||
+    eventType === INPUT_EVENT_MOUSE_UP ||
+    eventType === INPUT_EVENT_MOUSE_WHEEL ||
+    eventType === INPUT_EVENT_KEY_DOWN ||
+    eventType === INPUT_EVENT_KEY_UP ||
+    eventType === INPUT_EVENT_RESIZE_HINT ||
+    eventType === INPUT_EVENT_MONITOR_SELECT
+  );
+}
+
+function isMouseEvent(eventType: number): boolean {
+  return (
+    eventType === INPUT_EVENT_MOUSE_MOVE ||
+    eventType === INPUT_EVENT_MOUSE_DOWN ||
+    eventType === INPUT_EVENT_MOUSE_UP
+  );
+}
+
+function isKeyEvent(eventType: number): boolean {
+  return eventType === INPUT_EVENT_KEY_DOWN || eventType === INPUT_EVENT_KEY_UP;
+}
+
+function isDisplayEvent(eventType: number): boolean {
+  return eventType === INPUT_EVENT_RESIZE_HINT || eventType === INPUT_EVENT_MONITOR_SELECT;
 }
 
 export function parseFrameHeader(buffer: ArrayBuffer): FrameHeader | null {

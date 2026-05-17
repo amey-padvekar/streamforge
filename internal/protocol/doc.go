@@ -23,6 +23,36 @@ Packet type extension policy:
 	- New packet types must define ownership (agent, server, viewer), payload schema,
 		and rejection/acknowledgement behavior.
 	- Do not repurpose retired type IDs; keep historical mappings for diagnostics.
+	- INPUT packet type uses PacketTypeInput (0x08) and must remain wire-stable once released.
+
+INPUT event wire-value policy:
+	- InputEventType values are explicitly assigned and append-only.
+	- Current values: MouseMove=0x10, MouseDown=0x11, MouseUp=0x12, MouseWheel=0x13,
+		KeyDown=0x20, KeyUp=0x21, ResizeHint=0x30, MonitorSelect=0x31.
+	- Reserved ranges: 0x14-0x1F (mouse/pointer), 0x22-0x2F (keyboard),
+		0x32-0x3F (display/session control).
+	- Receivers must reject unknown InputEventType values by default.
+
+INPUT versioning and compatibility policy:
+	- InputEnvelope JSON keys are versioned by additive evolution in protocol v1.
+	- New optional fields may be added only as backward-compatible additions; existing
+		field names, types, and semantics are immutable within v1.
+	- Existing required fields (eventType, eventId, timestampNs, viewerId) cannot be removed
+		or made optional in v1.
+	- If an INPUT change requires field type reinterpretation, required-field removal,
+		or non-additive schema changes, a new protocol version is required.
+
+INPUT modifiers and reserved bits policy:
+	- Key modifiers currently use bitmask: ctrl(1<<0), alt(1<<1), shift(1<<2), meta(1<<3).
+	- Bits 4-7 are reserved for future extension and must be zero in v1 payloads.
+	- Receivers must reject payloads that set unknown modifier bits unless a newer
+		protocol version explicitly defines them.
+
+Unknown INPUT event handling expectations:
+	- Unknown InputEventType values are treated as protocol parse errors and must not
+		be forwarded to agent injection.
+	- Implementations should emit categorized telemetry for unknown/rejected INPUT events
+		to support compatibility diagnostics during rollout.
 
 Reserved flags usage policy:
 	- Header.Reserved byte must be zero in v1; non-zero is a protocol error.
